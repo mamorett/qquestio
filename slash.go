@@ -93,6 +93,35 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 			}
 			return slashResultMsg{feedback: "Copied last response to clipboard"}
 
+		case "/save", "/write":
+			if len(args) == 0 {
+				return appErrMsg{
+					err:    fmt.Errorf("/save requires at least a filename"),
+					reason: "Usage: /save <filename.md> OR /save all <filename.md>",
+					stage:  "slash",
+				}
+			}
+			var filename string
+			var saveAll bool
+			if args[0] == "all" {
+				if len(args) < 2 {
+					return appErrMsg{
+						err:    fmt.Errorf("/save all requires a filename"),
+						reason: "Usage: /save all <filename.md>",
+						stage:  "slash",
+					}
+				}
+				saveAll = true
+				filename = args[1]
+			} else {
+				filename = args[0]
+			}
+			if saveAll {
+				return m.saveAllConversationCmd(filename)()
+			} else {
+				return m.saveLastResponseCmd(filename)()
+			}
+
 		case "/quit":
 			return quitMsg{}
 
@@ -103,10 +132,13 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				"  /system <prompt>    - Update the custom LLM system prompt\n" +
 				"  /copy               - Copy the last assistant response to the clipboard\n" +
 				"  /copy all           - Copy the entire conversation transcript to the clipboard\n" +
+				"  /save <file.md>     - Write the last response directly to a markdown file\n" +
+				"  /save all <file.md> - Write the entire conversation history to a markdown file\n" +
 				"  /help               - Show this help information\n" +
 				"  /quit               - Exit the application\n\n" +
 				"Keyboard Shortcuts:\n" +
 				"  Ctrl+C              - Quit the application\n" +
+				"  Double Escape       - Stop prompt generation (cancel request)\n" +
 				"  Ctrl+Y              - Copy the last assistant response to the clipboard\n" +
 				"  Ctrl+R              - Toggle Markdown rendering vs. Raw Source\n" +
 				"  Up / Down           - Navigate prompt history"

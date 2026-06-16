@@ -110,6 +110,8 @@ Change state parameters or trigger clipboard actions at runtime from the prompt 
 - **`/system <prompt...>`**: Re-defines the active RAG system instructions for subsequent turns.
 - **`/copy`**: Copies the last assistant response text to the clipboard.
 - **`/copy all`**: Formats and copies the entire clean conversation transcript to the clipboard.
+- **`/save <file.md>`** (or **`/write <file.md>`**): Saves the last assistant response directly to a local markdown file.
+- **`/save all <file.md>`** (or **`/write all <file.md>`**): Formats and writes the entire conversation transcript (in full Markdown with headers, prompts, code fences, and retrieved references) directly to a local markdown file.
 - **`/help`**: Shows the help menu outlining commands and shortcut keys.
 - **`/quit`**: Exits the application.
 
@@ -121,6 +123,7 @@ Keyboard shortcuts are active global overlays and can be triggered without losin
 
 - **`Enter`**: Submit prompt query or execute slash command. (In `ERROR` state, clears the error).
 - **`Ctrl+C`**: Cancel in-flight request, close connections, and quit the application safely.
+- **`Double Escape` (press `Esc` twice)**: Cancel in-flight prompt generation (embeddings, search, reranking, or streaming) and return gracefully to the idle state.
 - **`Ctrl+R`**: Toggle viewport view mode between styled Glamour Markdown and raw Markdown source.
 - **`Ctrl+Y`**: Copy the last assistant response directly to your system clipboard.
 - **`Ctrl+Up` / `Ctrl+Down`**: Scroll the response viewport up and down by single lines.

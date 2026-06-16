@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/atotto/clipboard"
@@ -64,6 +65,8 @@ type Model struct {
 	lastPoints    []rag.QdrantPoint  // Retrieved points from Qdrant (current turn)
 	cancelRequest context.CancelFunc
 	streamReader  *rag.SSEReader
+	escCount      int                // consecutive Esc presses
+	stoppedByUser bool               // explicit user abort flag
 
 	// --- Qdrant Collection Stats ---
 	qdrantPoints  int
@@ -130,7 +133,31 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
 	case tea.KeyMsg:
+		if msg.Type != tea.KeyEscape {
+			m.escCount = 0
+		}
 		switch msg.Type {
+		case tea.KeyEscape:
+			if m.state == stateEmbedding || m.state == stateSearching || m.state == stateReranking || m.state == stateStreaming {
+				m.escCount++
+				if m.escCount == 2 {
+					m.escCount = 0
+					m.stoppedByUser = true
+					if m.cancelRequest != nil {
+						m.cancelRequest()
+					}
+					m.state = stateIdle
+					m.statusMsg = "Generation stopped"
+					if m.streamReader != nil {
+						_ = m.streamReader.Close()
+						m.streamReader = nil
+					}
+					m.lastQuery = ""
+					m.output = ""
+					m.updateViewport()
+				}
+				return m, nil
+			}
 		case tea.KeyCtrlC:
 			if m.cancelRequest != nil {
 				m.cancelRequest()
@@ -264,6 +291,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case appErrMsg:
+		if m.stoppedByUser {
+			m.stoppedByUser = false
+			return m, nil
+		}
 		m.state = stateError
 		m.statusMsg = fmt.Sprintf("Error [%s]: %s (%v)", msg.stage, msg.reason, msg.err)
 		if m.streamReader != nil {
@@ -691,6 +722,89 @@ func (m *Model) copyAllConversationCmd() tea.Cmd {
 			return appErrMsg{err: err, reason: "Failed to copy all to clipboard", stage: "slash"}
 		}
 		return slashResultMsg{feedback: "Copied all conversation to clipboard"}
+	}
+}
+
+// saveLastResponseCmd writes the last assistant response to a local file.
+func (m *Model) saveLastResponseCmd(filename string) tea.Cmd {
+	var lastResponse string
+	for i := len(m.history) - 1; i >= 0; i-- {
+		if m.history[i].Role == "assistant" {
+			lastResponse = m.history[i].Content
+			break
+		}
+	}
+	if lastResponse == "" {
+		return func() tea.Msg {
+			return slashResultMsg{feedback: "No response to save yet"}
+		}
+	}
+	return func() tea.Msg {
+		err := os.WriteFile(filename, []byte(lastResponse), 0644)
+		if err != nil {
+			return appErrMsg{err: err, reason: fmt.Sprintf("Failed to write to file: %s", filename), stage: "slash"}
+		}
+		return slashResultMsg{feedback: fmt.Sprintf("Saved last response to %s", filename)}
+	}
+}
+
+// saveAllConversationCmd formats and writes the entire conversation log to a local file.
+func (m *Model) saveAllConversationCmd(filename string) tea.Cmd {
+	if len(m.history) == 0 {
+		return func() tea.Msg {
+			return slashResultMsg{feedback: "No conversation history to save"}
+		}
+	}
+	var sb strings.Builder
+	sb.WriteString("# Conversation Transcript\n\n")
+	for _, turn := range m.history {
+		if turn.Role == "user" {
+			sb.WriteString("## ❯ You\n\n" + turn.Content + "\n\n")
+		} else if turn.Role == "assistant" {
+			sb.WriteString("## 🤖 Assistant\n\n" + turn.Content + "\n\n")
+			if len(turn.References) > 0 {
+				sb.WriteString("### References\n\n")
+				for i, pt := range turn.References {
+					pointIDStr := fmt.Sprintf("%v", pt.ID)
+					docName := extractDocumentName(pt.Payload)
+					if docName == "" {
+						docName = fmt.Sprintf("ID %s", pointIDStr)
+					}
+					var textStr string
+					if pt.Payload != nil {
+						for _, key := range []string{"text", "content", "document", "page_content", "description", "body"} {
+							if val, ok := pt.Payload[key]; ok {
+								if s, ok := val.(string); ok && s != "" {
+									textStr = s
+									break
+								}
+							}
+						}
+					}
+					sb.WriteString(fmt.Sprintf("* **[%d]** `%s` (Score: `%.4f` | ID: `%s`)\n", i+1, docName, pt.Score, pointIDStr))
+					if textStr != "" {
+						sb.WriteString("  ```text\n")
+						lines := strings.Split(strings.TrimSpace(textStr), "\n")
+						for _, line := range lines {
+							sb.WriteString("  " + line + "\n")
+						}
+						sb.WriteString("  ```\n\n")
+					}
+				}
+			}
+			sb.WriteString("---\n\n")
+		} else if turn.Role == "system" {
+			sb.WriteString("> *System Info: " + turn.Content + "*\n\n")
+			sb.WriteString("---\n\n")
+		}
+	}
+
+	return func() tea.Msg {
+		err := os.WriteFile(filename, []byte(sb.String()), 0644)
+		if err != nil {
+			return appErrMsg{err: err, reason: fmt.Sprintf("Failed to write to file: %s", filename), stage: "slash"}
+		}
+		return slashResultMsg{feedback: fmt.Sprintf("Saved entire transcript to %s", filename)}
 	}
 }
 
