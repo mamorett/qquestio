@@ -6,14 +6,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
 
+type QdrantMatch struct {
+	Value interface{} `json:"value,omitempty"`
+}
+
+type QdrantFieldCondition struct {
+	Key   string      `json:"key"`
+	Match QdrantMatch `json:"match"`
+}
+
+type QdrantFilter struct {
+	Must   []QdrantFieldCondition `json:"must,omitempty"`
+	Should []QdrantFieldCondition `json:"should,omitempty"`
+}
+
 type QdrantQueryRequest struct {
-	Query       []float32 `json:"query"`
-	Limit       int       `json:"limit"`
-	WithPayload bool      `json:"with_payload"`
+	Query       []float32     `json:"query"`
+	Filter      *QdrantFilter `json:"filter,omitempty"`
+	Limit       int           `json:"limit"`
+	WithPayload bool          `json:"with_payload"`
 }
 
 type QdrantPoint struct {
@@ -78,11 +94,50 @@ func (q *QdrantQueryResponse) UnmarshalJSON(data []byte) error {
 //           { "query": vector, "limit": limit, "with_payload": true }
 // Response: Extract ONLY the text field from each point's payload.
 // Returns:  Concatenated text payloads separated by "\n---\n", the points list, and an error if any.
-func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vector []float32, limit int) (string, []QdrantPoint, error) {
+func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vector []float32, limit int, filterKey, filterValue string) (string, []QdrantPoint, error) {
 	url := fmt.Sprintf("%s/collections/%s/points/query", strings.TrimSuffix(baseURL, "/"), collection)
+
+	var filter *QdrantFilter
+	if filterKey != "" && filterValue != "" {
+		isDocKey := false
+		docKeys := []string{"file_name", "filename", "file_path", "title", "document", "doc_name", "source", "source_file"}
+		for _, dk := range docKeys {
+			if strings.ToLower(filterKey) == dk {
+				isDocKey = true
+				break
+			}
+		}
+
+		if isDocKey || filterKey == "*" || filterKey == "any_file" {
+			var shouldConds []QdrantFieldCondition
+			for _, dk := range docKeys {
+				shouldConds = append(shouldConds, QdrantFieldCondition{
+					Key: dk,
+					Match: QdrantMatch{
+						Value: filterValue,
+					},
+				})
+			}
+			filter = &QdrantFilter{
+				Should: shouldConds,
+			}
+		} else {
+			filter = &QdrantFilter{
+				Must: []QdrantFieldCondition{
+					{
+						Key: filterKey,
+						Match: QdrantMatch{
+							Value: filterValue,
+						},
+					},
+				},
+			}
+		}
+	}
 
 	reqBody := QdrantQueryRequest{
 		Query:       vector,
+		Filter:      filter,
 		Limit:       limit,
 		WithPayload: true,
 	}
@@ -129,36 +184,69 @@ func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vecto
 }
 
 // ExtractText extracts the main text payload content from a QdrantPoint.
+// It gathers text from primary keys (text, content, document, etc.) and
+// other non-metadata keys to build a large, extensive, and complete context.
 func (pt QdrantPoint) ExtractText() string {
 	if pt.Payload == nil {
 		return ""
 	}
-	for _, key := range []string{"text", "content", "document", "page_content", "description", "body"} {
+
+	var parts []string
+	seen := make(map[string]bool)
+
+	// 1. Gather from primary keys first, in order of priority
+	primaryKeys := []string{"text", "content", "document", "page_content", "description", "body", "passage", "chunk", "context"}
+	for _, key := range primaryKeys {
 		if val, ok := pt.Payload[key]; ok {
 			if s, ok := val.(string); ok && s != "" {
-				return s
+				sClean := strings.TrimSpace(s)
+				if !seen[sClean] {
+					parts = append(parts, sClean)
+					seen[sClean] = true
+				}
 			}
 		}
 	}
-	var parts []string
-	for k, v := range pt.Payload {
+
+	// 2. Sort keys to iterate deterministically and prevent random Go map iteration order
+	var keys []string
+	for k := range pt.Payload {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	// 3. Gather from other non-metadata string keys to enrich context and prevent hallucinations
+	var otherParts []string
+	for _, k := range keys {
+		v := pt.Payload[k]
+		kl := strings.ToLower(k)
 		isMeta := false
-		for _, mk := range []string{"file", "filename", "file_name", "source", "title", "url", "path", "id", "score", "page", "author", "date", "created_at"} {
-			if k == mk {
+		// Skip known metadata keys
+		for _, mk := range []string{"file", "filename", "file_name", "file_path", "source", "title", "url", "path", "id", "score", "page", "author", "date", "created_at"} {
+			if kl == mk || strings.Contains(kl, "id") || strings.Contains(kl, "score") {
 				isMeta = true
 				break
 			}
 		}
 		if !isMeta {
 			if s, ok := v.(string); ok && len(s) > 5 {
-				parts = append(parts, s)
+				sClean := strings.TrimSpace(s)
+				if !seen[sClean] {
+					otherParts = append(otherParts, sClean)
+					seen[sClean] = true
+				}
 			}
 		}
 	}
-	if len(parts) > 0 {
-		return strings.Join(parts, " ")
+
+	// Combine all collected parts
+	allParts := append(parts, otherParts...)
+	if len(allParts) == 0 {
+		return ""
 	}
-	return ""
+
+	// Join parts with double newlines to maintain structure and lines
+	return strings.Join(allParts, "\n\n")
 }
 
 type QdrantCollectionInfo struct {

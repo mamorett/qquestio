@@ -31,9 +31,18 @@ type GenericRerankItem struct {
 }
 
 // Rerank queries a generic, model-agnostic reranker endpoint and returns relevance scores.
-func Rerank(ctx context.Context, url, apiKey, model, query string, texts []string) ([]RerankItem, error) {
+func Rerank(ctx context.Context, baseURL, apiKey, model, query string, texts []string) ([]RerankItem, error) {
 	if len(texts) == 0 {
 		return nil, nil
+	}
+
+	url := baseURL
+	if !strings.Contains(url, "/rerank") {
+		if strings.HasSuffix(strings.TrimSuffix(url, "/"), "/v1") {
+			url = strings.TrimSuffix(url, "/") + "/rerank"
+		} else {
+			url = strings.TrimSuffix(url, "/") + "/v1/rerank"
+		}
 	}
 
 	// Build a generic request body containing both texts and documents for maximum compatibility

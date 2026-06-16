@@ -10,8 +10,8 @@ import (
 )
 
 type EmbeddingRequest struct {
-	Model string `json:"model"`
-	Input string `json:"input"`
+	Model string   `json:"model"`
+	Input []string `json:"input"`
 }
 
 type EmbeddingResponse struct {
@@ -21,7 +21,7 @@ type EmbeddingResponse struct {
 }
 
 // GetEmbedding calls the llama.cpp /embedding endpoint.
-// Request:  POST { "model": model, "input": query }
+// Request:  POST { "model": model, "input": [query] }
 // Response: { "data": [{ "embedding": [0.1, 0.2, ...] }] }
 func GetEmbedding(ctx context.Context, baseURL, apiKey, model, text string) ([]float32, error) {
 	url := baseURL
@@ -35,7 +35,7 @@ func GetEmbedding(ctx context.Context, baseURL, apiKey, model, text string) ([]f
 
 	reqBody := EmbeddingRequest{
 		Model: model,
-		Input: text,
+		Input: []string{text},
 	}
 
 	jsonData, err := json.Marshal(reqBody)

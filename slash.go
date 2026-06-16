@@ -40,20 +40,89 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 			if len(args) != 1 {
 				return appErrMsg{
 					err:    fmt.Errorf("/limit requires exactly 1 argument"),
-					reason: "Usage: /limit <1-20>",
+					reason: "Usage: /limit <1-100>",
 					stage:  "slash",
 				}
 			}
 			n, err := strconv.Atoi(args[0])
-			if err != nil || n < 1 || n > 20 {
+			if err != nil || n < 1 || n > 100 {
 				return appErrMsg{
-					err:    fmt.Errorf("/limit must be an integer between 1 and 20"),
-					reason: "Limit must be 1-20",
+					err:    fmt.Errorf("/limit must be an integer between 1 and 100"),
+					reason: "Limit must be 1-100",
 					stage:  "slash",
 				}
 			}
 			m.searchLimit = n
 			return slashResultMsg{feedback: fmt.Sprintf("Search limit → %d", n)}
+
+		case "/mode":
+			if len(args) != 1 {
+				return appErrMsg{
+					err:    fmt.Errorf("/mode requires exactly 1 argument"),
+					reason: "Usage: /mode <strict|hybrid>",
+					stage:  "slash",
+				}
+			}
+			newMode := strings.ToLower(args[0])
+			if newMode != "strict" && newMode != "hybrid" {
+				return appErrMsg{
+					err:    fmt.Errorf("/mode must be 'strict' or 'hybrid'"),
+					reason: "Mode must be 'strict' or 'hybrid'",
+					stage:  "slash",
+				}
+			}
+			m.ragMode = newMode
+			return slashResultMsg{feedback: fmt.Sprintf("RAG mode → %s", newMode)}
+
+		case "/filter":
+			if len(args) == 0 || args[0] == "clear" {
+				m.filterKey = ""
+				m.filterValue = ""
+				return slashResultMsg{feedback: "Active metadata filter cleared"}
+			}
+			var key string
+			var val string
+			if len(args) == 1 {
+				key = "*"
+				val = args[0]
+			} else {
+				key = args[0]
+				val = strings.Join(args[1:], " ")
+			}
+			if strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"") && len(val) >= 2 {
+				val = val[1 : len(val)-1]
+			} else if strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'") && len(val) >= 2 {
+				val = val[1 : len(val)-1]
+			}
+			m.filterKey = key
+			m.filterValue = val
+			if key == "*" {
+				return slashResultMsg{feedback: fmt.Sprintf("Filter applied → [any document field] = %s", val)}
+			}
+			return slashResultMsg{feedback: fmt.Sprintf("Filter applied → %s = %s", key, val)}
+
+		case "/rerank":
+			if len(args) != 1 {
+				return appErrMsg{
+					err:    fmt.Errorf("/rerank requires 'on' or 'off'"),
+					reason: "Usage: /rerank <on|off>",
+					stage:  "slash",
+				}
+			}
+			val := strings.ToLower(args[0])
+			if val == "on" {
+				m.disableReranker = false
+				return slashResultMsg{feedback: "Reranker enabled"}
+			} else if val == "off" {
+				m.disableReranker = true
+				return slashResultMsg{feedback: "Reranker disabled (bypassed)"}
+			} else {
+				return appErrMsg{
+					err:    fmt.Errorf("/rerank must be 'on' or 'off'"),
+					reason: "Usage: /rerank <on|off>",
+					stage:  "slash",
+				}
+			}
 
 		case "/system":
 			if len(args) == 0 {
@@ -128,7 +197,10 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 		case "/help":
 			helpText := "Available Slash Commands:\n" +
 				"  /collection <name>  - Switch the active Qdrant collection\n" +
-				"  /limit <1-20>       - Set the number of context documents to retrieve\n" +
+				"  /limit <1-100>      - Set the number of context documents to retrieve\n" +
+				"  /filter [key] <val> - Filter search (e.g. '/filter file_name guide.txt' or '/filter guide.txt')\n" +
+				"  /rerank <on|off>    - Enable/disable the reranker step\n" +
+				"  /mode <strict|hybrid>- Switch RAG mode (strict closed-book vs hybrid general-knowledge)\n" +
 				"  /system <prompt>    - Update the custom LLM system prompt\n" +
 				"  /copy               - Copy the last assistant response to the clipboard\n" +
 				"  /copy all           - Copy the entire conversation transcript to the clipboard\n" +

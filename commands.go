@@ -26,7 +26,7 @@ func (m *Model) generateEmbeddingCmd(query string) tea.Cmd {
 func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 	return func() tea.Msg {
 		limit := m.searchLimit
-		if m.cfg.RerankerURL != "" {
+		if m.cfg.RerankerURL != "" && !m.disableReranker {
 			limit = m.searchLimit * 3
 			if limit < 20 {
 				limit = 20
@@ -35,6 +35,7 @@ func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 		results, points, err := rag.SearchQdrant(
 			m.ctx, m.cfg.QdrantURL, m.cfg.QdrantAPIKey,
 			m.collection, vector, limit,
+			m.filterKey, m.filterValue,
 		)
 		if err != nil {
 			return appErrMsg{err: err, reason: "Qdrant search failed", stage: "search"}
@@ -138,7 +139,7 @@ func (m *Model) rerankPointsCmd(points []rag.QdrantPoint) tea.Cmd {
 		}
 
 		// Sort by score desc
-		sort.Slice(scoredPoints, func(i, j int) bool {
+		sort.SliceStable(scoredPoints, func(i, j int) bool {
 			return scoredPoints[i].score > scoredPoints[j].score
 		})
 
@@ -167,23 +168,59 @@ func (m *Model) rerankPointsCmd(points []rag.QdrantPoint) tea.Cmd {
 func (m *Model) buildPromptMessages() []rag.ChatMessage {
 	msgs := []rag.ChatMessage{}
 
-	// 1. System prompt
 	system := m.systemPrompt
 	if system == "" {
-		system = "You are QQuestio, an advanced, highly articulate enterprise RAG assistant. " +
-			"Your goal is to provide comprehensive, detailed, and well-structured answers using the retrieved context documents. " +
-			"Analyze the retrieved context chunks carefully, synthesize the information from all sources, and answer the user's question in a creative, professional, and fully expanded manner. " +
-			"Connect different parts of the context to form a coherent, narrative explanation. " +
-			"Do not give brief or one-word answers. Always explain the background and details. " +
-			"Use rich Markdown formatting (bullet points, bold text, headers, code blocks where appropriate) to make your output clear and easy to read. " +
-			"If the retrieved context does not contain the complete answer, use your extensive general knowledge to enrich the answer, but note which parts came from your knowledge base and which parts were retrieved locally."
+		if m.ragMode == "hybrid" {
+			system = "You are QQuestio, an advanced, highly articulate enterprise hybrid RAG assistant. " +
+				"Your goal is to provide comprehensive, detailed, and well-structured answers by synthesizing the retrieved context chunks with your general knowledge and model weights.\n" +
+				"Adhere to the following guidelines:\n" +
+				"1. BLEND LOCAL CONTEXT WITH GENERAL KNOWLEDGE: Combine the facts directly mentioned in the 'Retrieved Context Chunks' below with your general knowledge base to construct a complete, rich, and detailed explanation.\n" +
+				"2. EXPLICIT DISTINCTION & ATTRIBUTION: You must explicitly state which parts of your explanation are retrieved directly from local sources, and which parts are contributed by your general knowledge. Cite local sources inline (e.g. '[Document: filename | Chunk X]').\n" +
+				"3. CREATIVE & PROFESSIONAL EXTENSION: Connect different parts of the context with narrative explanation, background info, and details, ensuring a highly helpful and well-structured result.\n" +
+				"4. TRANSPARENT UNCERTAINTY: If you are unsure or are presenting general knowledge info, clearly label it as general/historical knowledge to maintain clarity."
+		} else {
+			system = "You are QQuestio, a state-of-the-art enterprise RAG assistant. " +
+				"Your primary mandate is to perform deep, highly rigorous, and completely grounded research to provide extremely accurate answers. " +
+				"You are operating in a STRICT closed-book RAG environment. You must adhere to the following ABSOLUTE guidelines to prevent hallucinations:\n" +
+				"1. STRICT CONSTRAINTS: Rely ONLY on the clear facts directly mentioned in the 'Retrieved Context Chunks' below. Do NOT assume, extrapolate, speculate, or invent any details, facts, numbers, dates, names, or URLs. If a fact is not explicitly stated in the context, treat it as completely untrue and non-existent.\n" +
+				"2. ABSOLUTELY NO GENERAL KNOWLEDGE OR HALLUCINATION: You are forbidden from using any external or general knowledge not contained in the provided chunks. Do NOT make up any information under any circumstances. If the retrieved chunks do not contain the answer, you must state: 'I am sorry, but the retrieved context does not contain enough information to answer this question.' Do not attempt to enrich the answer with general knowledge or speculation.\n" +
+				"3. SUPER DEEP & METICULOUS ANALYSIS: Carefully examine every single line of the retrieved context. Synthesize details across multiple chunks, cross-reference them, and provide a comprehensive, highly thorough, well-reasoned, and step-by-step grounded answer.\n" +
+				"4. COMPULSORY SOURCE CITATION: Every claim, statement of fact, or explanation you write must be directly followed by an inline citation to its source document and chunk (e.g. '[Document: filename | Chunk X]'). If a statement cannot be cited, do not write it.\n" +
+				"5. HIGHEST GROUNDING FIDELITY: Treat the retrieved context as the absolute and only source of truth. Prioritize absolute factual correctness over creative writing or helpfulness."
+		}
 	}
 	msgs = append(msgs, rag.ChatMessage{Role: "system", Content: system})
 
 	// 2. Conversation history (multi-turn)
-	for _, turn := range m.history {
-		if turn.Role == "user" || turn.Role == "assistant" {
-			msgs = append(msgs, rag.ChatMessage{Role: turn.Role, Content: turn.Content})
+	for i := 0; i < len(m.history); i++ {
+		turn := m.history[i]
+		if turn.Role == "user" {
+			// Locate subsequent assistant turn to extract references if any
+			var pastRefs []rag.QdrantPoint
+			if i+1 < len(m.history) && m.history[i+1].Role == "assistant" {
+				pastRefs = m.history[i+1].References
+			}
+
+			var histContextBuilder strings.Builder
+			if len(pastRefs) > 0 {
+				histContextBuilder.WriteString("Retrieved Context Chunks from Knowledge Base:\n")
+				for idx, pt := range pastRefs {
+					source := extractDocumentName(pt.Payload)
+					textStr := pt.ExtractText()
+					pointIDStr := fmt.Sprintf("%v", pt.ID)
+
+					docName := source
+					if docName == "" {
+						docName = fmt.Sprintf("ID %s", pointIDStr)
+					}
+					histContextBuilder.WriteString(fmt.Sprintf("--- Chunk %d | Document: %s ---\n%s\n", idx+1, docName, textStr))
+				}
+				histContextBuilder.WriteString("---\n\n")
+			}
+			userMsg := fmt.Sprintf("%sQuestion: %s", histContextBuilder.String(), turn.Content)
+			msgs = append(msgs, rag.ChatMessage{Role: "user", Content: userMsg})
+		} else if turn.Role == "assistant" {
+			msgs = append(msgs, rag.ChatMessage{Role: "assistant", Content: turn.Content})
 		}
 	}
 
@@ -192,64 +229,9 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 	if len(m.lastPoints) > 0 {
 		contextBuilder.WriteString("Retrieved Context Chunks from Knowledge Base:\n")
 		for i, pt := range m.lastPoints {
-			var source string
-			var textStr string
+			source := extractDocumentName(pt.Payload)
+			textStr := pt.ExtractText()
 			pointIDStr := fmt.Sprintf("%v", pt.ID)
-			if pt.Payload != nil {
-				// Prioritized key list for human-readable document name
-				for _, key := range []string{"file_name", "filename", "fileName", "document_name", "doc_name", "title", "source", "name"} {
-					if val, ok := pt.Payload[key]; ok {
-						if s, ok := val.(string); ok && s != "" {
-							source = s
-							break
-						}
-					}
-				}
-				// Generic fallback, excluding key names containing "id" or "score" to prevent selecting point IDs
-				if source == "" {
-					for k, val := range pt.Payload {
-						kl := strings.ToLower(k)
-						if strings.Contains(kl, "id") || strings.Contains(kl, "score") {
-							continue
-						}
-						if strings.Contains(kl, "file") || strings.Contains(kl, "name") || strings.Contains(kl, "title") || strings.Contains(kl, "source") || strings.Contains(kl, "path") || strings.Contains(kl, "url") {
-							if s, ok := val.(string); ok && s != "" {
-								source = s
-								break
-							}
-						}
-					}
-				}
-
-				for _, key := range []string{"text", "content", "document", "page_content", "description", "body"} {
-					if val, ok := pt.Payload[key]; ok {
-						if s, ok := val.(string); ok && s != "" {
-							textStr = s
-							break
-						}
-					}
-				}
-				if textStr == "" {
-					var parts []string
-					for k, v := range pt.Payload {
-						isMeta := false
-						for _, mk := range []string{"file", "filename", "file_name", "source", "title", "url", "path", "id", "score", "page", "author", "date", "created_at"} {
-							if k == mk {
-								isMeta = true
-								break
-							}
-						}
-						if !isMeta {
-							if s, ok := v.(string); ok && len(s) > 5 {
-								parts = append(parts, s)
-							}
-						}
-					}
-					if len(parts) > 0 {
-						textStr = strings.Join(parts, " ")
-					}
-				}
-			}
 
 			docName := source
 			if docName == "" {

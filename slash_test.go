@@ -51,7 +51,7 @@ func TestHandleSlashCmd_Limit(t *testing.T) {
 	}
 
 	// Test invalid limit value
-	cmdInvalid := m.handleSlashCmd("/limit 25")
+	cmdInvalid := m.handleSlashCmd("/limit 105")
 	msgInvalid := cmdInvalid()
 	_, isErr := msgInvalid.(appErrMsg)
 	if !isErr {
@@ -136,3 +136,148 @@ func TestHandleSlashCmd_Save(t *testing.T) {
 		t.Errorf("unexpected file content for save all: %s", string(dataAll))
 	}
 }
+
+func TestHandleSlashCmd_Mode(t *testing.T) {
+	cfg := Config{DefaultCollection: "default"}
+	m := NewModel(context.Background(), cfg)
+
+	// Test default mode
+	if m.ragMode != "strict" {
+		t.Errorf("expected default ragMode to be strict, got %s", m.ragMode)
+	}
+
+	// Switch to hybrid
+	cmd := m.handleSlashCmd("/mode hybrid")
+	msg := cmd()
+	resultMsg, ok := msg.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msg)
+	}
+	if resultMsg.feedback != "RAG mode → hybrid" {
+		t.Errorf("unexpected feedback: %s", resultMsg.feedback)
+	}
+	if m.ragMode != "hybrid" {
+		t.Errorf("expected ragMode to be hybrid, got %s", m.ragMode)
+	}
+
+	// Switch to strict
+	cmdStrict := m.handleSlashCmd("/mode strict")
+	msgStrict := cmdStrict()
+	resultStrictMsg, ok := msgStrict.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msgStrict)
+	}
+	if resultStrictMsg.feedback != "RAG mode → strict" {
+		t.Errorf("unexpected feedback: %s", resultStrictMsg.feedback)
+	}
+	if m.ragMode != "strict" {
+		t.Errorf("expected ragMode to be strict, got %s", m.ragMode)
+	}
+
+	// Invalid mode
+	cmdInvalid := m.handleSlashCmd("/mode invalid")
+	msgInvalid := cmdInvalid()
+	_, isErr := msgInvalid.(appErrMsg)
+	if !isErr {
+		t.Fatalf("expected appErrMsg for invalid mode, got %T", msgInvalid)
+	}
+}
+
+func TestHandleSlashCmd_Filter(t *testing.T) {
+	cfg := Config{DefaultCollection: "default"}
+	m := NewModel(context.Background(), cfg)
+
+	// Test default filter
+	if m.filterKey != "" || m.filterValue != "" {
+		t.Errorf("expected default filter to be empty, got key=%s, val=%s", m.filterKey, m.filterValue)
+	}
+
+	// Apply specific key-value filter
+	cmd := m.handleSlashCmd("/filter file_name guide.txt")
+	msg := cmd()
+	resultMsg, ok := msg.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msg)
+	}
+	if resultMsg.feedback != "Filter applied → file_name = guide.txt" {
+		t.Errorf("unexpected feedback: %s", resultMsg.feedback)
+	}
+	if m.filterKey != "file_name" || m.filterValue != "guide.txt" {
+		t.Errorf("expected filter to be file_name=guide.txt, got %s=%s", m.filterKey, m.filterValue)
+	}
+
+	// Clear filter
+	cmdClear := m.handleSlashCmd("/filter clear")
+	msgClear := cmdClear()
+	resultClearMsg, ok := msgClear.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msgClear)
+	}
+	if resultClearMsg.feedback != "Active metadata filter cleared" {
+		t.Errorf("unexpected feedback: %s", resultClearMsg.feedback)
+	}
+	if m.filterKey != "" || m.filterValue != "" {
+		t.Errorf("expected filter to be empty after clear, got %s=%s", m.filterKey, m.filterValue)
+	}
+
+	// Wildcard filter
+	cmdWildcard := m.handleSlashCmd("/filter guide.txt")
+	msgWildcard := cmdWildcard()
+	resultWildcardMsg, ok := msgWildcard.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msgWildcard)
+	}
+	if !strings.Contains(resultWildcardMsg.feedback, "[any document field] = guide.txt") {
+		t.Errorf("unexpected feedback: %s", resultWildcardMsg.feedback)
+	}
+	if m.filterKey != "*" || m.filterValue != "guide.txt" {
+		t.Errorf("expected filter to be *=guide.txt, got %s=%s", m.filterKey, m.filterValue)
+	}
+}
+
+func TestHandleSlashCmd_Rerank(t *testing.T) {
+	cfg := Config{DefaultCollection: "default"}
+	m := NewModel(context.Background(), cfg)
+
+	// Default state
+	if m.disableReranker {
+		t.Errorf("expected default disableReranker to be false, got true")
+	}
+
+	// Disable it
+	cmdOff := m.handleSlashCmd("/rerank off")
+	msgOff := cmdOff()
+	resultOff, ok := msgOff.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msgOff)
+	}
+	if resultOff.feedback != "Reranker disabled (bypassed)" {
+		t.Errorf("unexpected feedback: %s", resultOff.feedback)
+	}
+	if !m.disableReranker {
+		t.Errorf("expected disableReranker to be true, got false")
+	}
+
+	// Enable it
+	cmdOn := m.handleSlashCmd("/rerank on")
+	msgOn := cmdOn()
+	resultOn, ok := msgOn.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msgOn)
+	}
+	if resultOn.feedback != "Reranker enabled" {
+		t.Errorf("unexpected feedback: %s", resultOn.feedback)
+	}
+	if m.disableReranker {
+		t.Errorf("expected disableReranker to be false, got true")
+	}
+
+	// Invalid arg
+	cmdInvalid := m.handleSlashCmd("/rerank invalid")
+	msgInvalid := cmdInvalid()
+	_, isErr := msgInvalid.(appErrMsg)
+	if !isErr {
+		t.Fatalf("expected appErrMsg for invalid arg, got %T", msgInvalid)
+	}
+}
+

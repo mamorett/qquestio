@@ -2,9 +2,11 @@ package rag
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -50,7 +52,7 @@ func TestSearchQdrant(t *testing.T) {
 	}))
 	defer server1.Close()
 
-	res1, pts1, err := SearchQdrant(context.Background(), server1.URL, "secret", "my-col", []float32{0.1}, 5)
+	res1, pts1, err := SearchQdrant(context.Background(), server1.URL, "secret", "my-col", []float32{0.1}, 5, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -70,7 +72,7 @@ func TestSearchQdrant(t *testing.T) {
 	}))
 	defer server2.Close()
 
-	res2, pts2, err := SearchQdrant(context.Background(), server2.URL, "secret", "my-col", []float32{0.1}, 5)
+	res2, pts2, err := SearchQdrant(context.Background(), server2.URL, "secret", "my-col", []float32{0.1}, 5, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -167,3 +169,139 @@ func TestRerank(t *testing.T) {
 		t.Errorf("unexpected results for envelope object: %v", items3)
 	}
 }
+
+func TestQdrantPoint_ExtractText(t *testing.T) {
+	tests := []struct {
+		name     string
+		payload  map[string]interface{}
+		expected string
+	}{
+		{
+			name: "Single primary key",
+			payload: map[string]interface{}{
+				"text": "Hello world from primary key",
+			},
+			expected: "Hello world from primary key",
+		},
+		{
+			name: "Multiple primary keys",
+			payload: map[string]interface{}{
+				"text":    "First primary key content",
+				"content": "Second primary key content",
+			},
+			expected: "First primary key content\n\nSecond primary key content",
+		},
+		{
+			name: "Primary key and metadata keys",
+			payload: map[string]interface{}{
+				"text":      "Important content",
+				"file_name": "ignore_me.txt",
+				"score":     0.98,
+				"id":        "123",
+			},
+			expected: "Important content",
+		},
+		{
+			name: "Primary key and other non-metadata keys",
+			payload: map[string]interface{}{
+				"text":            "Primary content",
+				"secondary_story": "Additional story details",
+				"filename":        "source.txt",
+			},
+			expected: "Primary content\n\nAdditional story details",
+		},
+		{
+			name: "No primary keys but other non-metadata keys",
+			payload: map[string]interface{}{
+				"unrecognized_field": "This is fallback content",
+				"another_field":      "More fallback content",
+				"source":             "doc.pdf",
+			},
+			expected: "This is fallback content\n\nMore fallback content", // Order is map iteration based, but checking existence of both is key
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pt := QdrantPoint{Payload: tc.payload}
+			got := pt.ExtractText()
+			if tc.name == "No primary keys but other non-metadata keys" {
+				// Map iteration order is non-deterministic in Go, so check elements
+				if !strings.Contains(got, "This is fallback content") || !strings.Contains(got, "More fallback content") {
+					t.Errorf("expected to contain both fallback contents, got: %q", got)
+				}
+			} else {
+				if got != tc.expected {
+					t.Errorf("expected: %q, got: %q", tc.expected, got)
+				}
+			}
+		})
+	}
+}
+
+func TestSearchQdrant_Filter(t *testing.T) {
+	// 1. Test document-identifying key (file_name) -> should produce Should conditions
+	serverDoc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req QdrantQueryRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+		if req.Filter == nil {
+			t.Error("expected filter to be present, got nil")
+		} else {
+			if len(req.Filter.Should) == 0 {
+				t.Error("expected should conditions to be present, got 0")
+			} else {
+				foundFilePathMatch := false
+				for _, cond := range req.Filter.Should {
+					if cond.Key == "file_path" && cond.Match.Value == "guide.txt" {
+						foundFilePathMatch = true
+						break
+					}
+				}
+				if !foundFilePathMatch {
+					t.Error("expected file_path condition in should array, but not found")
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"result": [{"id": 1, "payload": {"text": "hello flat filtered qdrant"}}]}`)
+	}))
+	defer serverDoc.Close()
+
+	_, _, err := SearchQdrant(context.Background(), serverDoc.URL, "secret", "my-col", []float32{0.1}, 5, "file_name", "guide.txt")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// 2. Test non-document key (chunk_index) -> should produce Must conditions
+	serverNonDoc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req QdrantQueryRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+		if req.Filter == nil {
+			t.Error("expected filter to be present, got nil")
+		} else {
+			if len(req.Filter.Must) != 1 {
+				t.Errorf("expected 1 must condition, got %d", len(req.Filter.Must))
+			} else {
+				cond := req.Filter.Must[0]
+				if cond.Key != "chunk_index" || cond.Match.Value != "5" {
+					t.Errorf("unexpected filter condition: key=%s, value=%v", cond.Key, cond.Match.Value)
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"result": [{"id": 1, "payload": {"text": "hello flat filtered qdrant"}}]}`)
+	}))
+	defer serverNonDoc.Close()
+
+	_, _, err = SearchQdrant(context.Background(), serverNonDoc.URL, "secret", "my-col", []float32{0.1}, 5, "chunk_index", "5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+

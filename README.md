@@ -107,6 +107,8 @@ Change state parameters or trigger clipboard actions at runtime from the prompt 
 
 - **`/collection <name>`**: Switches the active vector store collection instantly.
 - **`/limit <1-20>`**: Modifies the number of retrieved context snippets from Qdrant.
+- **`/filter <key> <value>`** (or **`/filter clear`**): Filters vector search by exact metadata key-value match (e.g. `/filter file_name guide.txt`).
+- **`/mode <strict|hybrid>`**: Switches between strict closed-book RAG and hybrid general-knowledge RAG modes.
 - **`/system <prompt...>`**: Re-defines the active RAG system instructions for subsequent turns.
 - **`/copy`**: Copies the last assistant response text to the clipboard.
 - **`/copy all`**: Formats and copies the entire clean conversation transcript to the clipboard.

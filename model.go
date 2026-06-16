@@ -29,11 +29,13 @@ const (
 )
 
 type ConversationTurn struct {
-	Role            string             // "user" | "assistant" | "system"
-	Content         string             // The text content
-	References      []rag.QdrantPoint  // Retrieved context points (only for assistant responses)
-	RenderedContent string             // Cached rendered markdown
-	RenderedWidth   int                // The width at which it was rendered
+	Role                    string             // "user" | "assistant" | "system"
+	Content                 string             // The text content
+	References              []rag.QdrantPoint  // Retrieved context points (only for assistant responses)
+	RenderedContent         string             // Cached rendered markdown
+	RenderedWidth           int                // The width at which it was rendered
+	RenderedReferences      string             // Cached rendered references block
+	RenderedReferencesWidth int                // The width at which references were rendered
 }
 
 type Model struct {
@@ -44,6 +46,10 @@ type Model struct {
 	collection   string // Active Qdrant collection (init: cfg.DefaultCollection)
 	searchLimit  int    // Number of Qdrant results (default: 5)
 	systemPrompt string // Custom system prompt (default: built-in RAG prompt)
+	ragMode         string // RAG mode: "strict" or "hybrid"
+	filterKey       string // Active filter metadata key
+	filterValue     string // Active filter metadata value
+	disableReranker bool   // Toggle to bypass reranker step
 
 	// --- FSM ---
 	state appState
@@ -116,6 +122,10 @@ func NewModel(ctx context.Context, cfg Config) *Model {
 		statusMsg:    "Ready",
 		skills:       NewSkillRegistry(),
 		ctx:          ctx,
+		ragMode:      "strict",
+		filterKey:    "",
+		filterValue:  "",
+		disableReranker: false,
 	}
 }
 
@@ -246,7 +256,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.searchQdrantCmd(msg.vector))
 
 	case searchResultMsg:
-		if m.cfg.RerankerURL != "" {
+		if m.cfg.RerankerURL != "" && !m.disableReranker {
 			m.state = stateReranking
 			m.statusMsg = "Reranking retrieved documents..."
 			m.updateViewport()
@@ -340,7 +350,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		headerH, footerH := 4, 3
+		headerH := 4
+		if m.cfg.RerankerURL != "" {
+			headerH = 5
+		}
+		footerH := 3
 		m.viewport.Width = m.width
 		m.viewport.Height = m.height - headerH - footerH
 		m.textInput.Width = m.width - 4
@@ -357,9 +371,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	cmds = append(cmds, tiCmd)
 
 	if m.state == stateStreaming || m.state == stateIdle || m.state == stateError {
-		var vpCmd tea.Cmd
-		m.viewport, vpCmd = m.viewport.Update(msg)
-		cmds = append(cmds, vpCmd)
+		var shouldForward = true
+		if keyMsg, ok := msg.(tea.KeyMsg); ok {
+			if keyMsg.Type == tea.KeyUp || keyMsg.Type == tea.KeyDown {
+				shouldForward = false
+			}
+		}
+		if shouldForward {
+			var vpCmd tea.Cmd
+			m.viewport, vpCmd = m.viewport.Update(msg)
+			cmds = append(cmds, vpCmd)
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -406,7 +428,12 @@ func (m *Model) renderHeader() string {
 
 	// Line 1: Program Name and Status
 	statusStr := fmt.Sprintf("[%s] %s", statusText, m.statusMsg)
-	leftText := fmt.Sprintf(" ◉ QQuestio v%s  %s%s", Version, indicator, statusStyle.Render(statusStr))
+	modeColor := nord14 // green for strict
+	if m.ragMode == "hybrid" {
+		modeColor = nord13 // yellow/orange for hybrid
+	}
+	modeText := lipgloss.NewStyle().Foreground(modeColor).Render(fmt.Sprintf("(%s)", m.ragMode))
+	leftText := fmt.Sprintf(" ◉ QQuestio v%s %s  %s%s", Version, modeText, indicator, statusStyle.Render(statusStr))
 	line1Left := styles.Header.Render(leftText)
 
 	tagRender := styles.CollectionTag.Render(m.collection)
@@ -449,12 +476,16 @@ func (m *Model) renderHeader() string {
 		)
 	}
 
-	qdrantInfo := fmt.Sprintf(" %s %s  %s  %s %s  %s %s %d%s",
+	modeView := lipgloss.NewStyle().Foreground(modeColor).Bold(true).Render(m.ragMode)
+
+	qdrantInfo := fmt.Sprintf(" %s %s  %s  %s %s  %s %s %d  %s  %s %s%s",
 		labelStyle.Render("DB:"), valueStyle.Render(m.cfg.QdrantURL),
 		delimStyle.Render("│"),
 		labelStyle.Render("Col:"), valueStyle.Render(m.collection),
 		delimStyle.Render("│"),
 		labelStyle.Render("Limit:"), m.searchLimit,
+		delimStyle.Render("│"),
+		labelStyle.Render("Mode:"), modeView,
 		statsStr,
 	)
 	line2Pad := m.width - lipgloss.Width(qdrantInfo)
@@ -475,9 +506,35 @@ func (m *Model) renderHeader() string {
 	}
 	line3 := lipgloss.NewStyle().Background(nord2).Render(modelInfo)
 
+	// Line 4: Reranker Info (Optional)
+	var line4 string
+	if m.cfg.RerankerURL != "" {
+		rerankerModel := m.cfg.RerankerModel
+		if rerankerModel == "" {
+			rerankerModel = "generic"
+		}
+		statusDisp := "enabled"
+		statusStyle := lipgloss.NewStyle().Foreground(nord14).Bold(true)
+		if m.disableReranker {
+			statusDisp = "bypassed"
+			statusStyle = lipgloss.NewStyle().Foreground(nord13).Bold(true)
+		}
+		rerankInfo := fmt.Sprintf(" %s %s (%s) [%s]",
+			labelStyle.Render("Rerank:"), valueStyle.Render(rerankerModel), valueStyle.Render(m.cfg.RerankerURL), statusStyle.Render(statusDisp),
+		)
+		line4Pad := m.width - lipgloss.Width(rerankInfo)
+		if line4Pad > 0 {
+			rerankInfo += strings.Repeat(" ", line4Pad)
+		}
+		line4 = lipgloss.NewStyle().Background(nord2).Render(rerankInfo)
+	}
+
 	// Border separator
 	border := lipgloss.NewStyle().Foreground(nord3).Render(strings.Repeat("─", m.width))
 
+	if line4 != "" {
+		return lipgloss.JoinVertical(lipgloss.Left, line1, line2, line3, line4, border)
+	}
 	return lipgloss.JoinVertical(lipgloss.Left, line1, line2, line3, border)
 }
 
@@ -510,6 +567,22 @@ func (m *Model) getRenderedTurn(turn *ConversationTurn) string {
 	return turn.RenderedContent
 }
 
+// getRenderedReferences renders (or retrieves from cache) the references block of a turn.
+func (m *Model) getRenderedReferences(turn *ConversationTurn) string {
+	if len(turn.References) == 0 {
+		return ""
+	}
+	targetWidth := m.width - 4
+	if targetWidth < 20 {
+		targetWidth = 20
+	}
+	if turn.RenderedReferences == "" || turn.RenderedReferencesWidth != targetWidth {
+		turn.RenderedReferences = formatReferences(turn.References, targetWidth)
+		turn.RenderedReferencesWidth = targetWidth
+	}
+	return turn.RenderedReferences
+}
+
 // updateViewport constructs and renders the conversation history in the viewport.
 func (m *Model) updateViewport() {
 	var sb strings.Builder
@@ -526,7 +599,7 @@ func (m *Model) updateViewport() {
 				sb.WriteString(m.getRenderedTurn(turn) + "\n\n")
 			}
 			if len(turn.References) > 0 {
-				sb.WriteString(formatReferences(turn.References, m.width-4) + "\n\n")
+				sb.WriteString(m.getRenderedReferences(turn) + "\n\n")
 			}
 			// Add a horizontal rule separating turns
 			sb.WriteString(lipgloss.NewStyle().Foreground(nord3).Render(strings.Repeat("─", m.width-4)) + "\n\n")
@@ -681,18 +754,8 @@ func (m *Model) copyAllConversationCmd() tea.Cmd {
 			if len(turn.References) > 0 {
 				sb.WriteString("References:\n")
 				for i, pt := range turn.References {
-					var textStr string
 					pointIDStr := fmt.Sprintf("%v", pt.ID)
-					if pt.Payload != nil {
-						for _, key := range []string{"text", "content", "document", "page_content", "description", "body"} {
-							if val, ok := pt.Payload[key]; ok {
-								if s, ok := val.(string); ok && s != "" {
-									textStr = s
-									break
-								}
-							}
-						}
-					}
+					textStr := pt.ExtractText()
 
 					docName := extractDocumentName(pt.Payload)
 					if docName == "" {
@@ -770,17 +833,7 @@ func (m *Model) saveAllConversationCmd(filename string) tea.Cmd {
 					if docName == "" {
 						docName = fmt.Sprintf("ID %s", pointIDStr)
 					}
-					var textStr string
-					if pt.Payload != nil {
-						for _, key := range []string{"text", "content", "document", "page_content", "description", "body"} {
-							if val, ok := pt.Payload[key]; ok {
-								if s, ok := val.(string); ok && s != "" {
-									textStr = s
-									break
-								}
-							}
-						}
-					}
+					textStr := pt.ExtractText()
 					sb.WriteString(fmt.Sprintf("* **[%d]** `%s` (Score: `%.4f` | ID: `%s`)\n", i+1, docName, pt.Score, pointIDStr))
 					if textStr != "" {
 						sb.WriteString("  ```text\n")
@@ -822,18 +875,8 @@ func formatReferences(points []rag.QdrantPoint, width int) string {
 
 	sb.WriteString(titleStyle.Render("📚 References / Retrieved Context Chunks:") + "\n")
 	for i, pt := range points {
-		var textStr string
 		pointIDStr := fmt.Sprintf("%v", pt.ID)
-		if pt.Payload != nil {
-			for _, key := range []string{"text", "content", "document", "page_content", "description", "body"} {
-				if val, ok := pt.Payload[key]; ok {
-					if s, ok := val.(string); ok && s != "" {
-						textStr = s
-						break
-					}
-				}
-			}
-		}
+		textStr := pt.ExtractText()
 
 		source := extractDocumentName(pt.Payload)
 
@@ -886,7 +929,7 @@ func extractDocumentName(payload map[string]interface{}) string {
 
 	targetKeys := []string{
 		"file_name", "filename", "fileName", "document_name", "doc_name",
-		"source_file", "sourceFile", "title", "source", "name", "path", "url",
+		"document", "doc", "source_file", "sourceFile", "title", "source", "name", "path", "url",
 	}
 
 	var hashCandidate string
@@ -914,7 +957,7 @@ func extractDocumentName(payload map[string]interface{}) string {
 			if strings.Contains(kl, "id") || strings.Contains(kl, "score") {
 				continue
 			}
-			if strings.Contains(kl, "file") || strings.Contains(kl, "name") || strings.Contains(kl, "title") || strings.Contains(kl, "source") || strings.Contains(kl, "path") || strings.Contains(kl, "url") {
+			if strings.Contains(kl, "file") || strings.Contains(kl, "name") || strings.Contains(kl, "title") || strings.Contains(kl, "source") || strings.Contains(kl, "path") || strings.Contains(kl, "url") || strings.Contains(kl, "doc") {
 				if s, ok := val.(string); ok && s != "" {
 					if isHexHash(s) {
 						if hashCandidate == "" {
