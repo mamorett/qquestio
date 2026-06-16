@@ -30,3 +30,11 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Application specific builds and logs
+/bin/
+/qquestio
+/debug.log
+/config.json
+
+
