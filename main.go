@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -10,6 +11,16 @@ import (
 )
 
 func main() {
+	// Parse version flags
+	versionFlag := flag.Bool("version", false, "Print version information and exit")
+	vFlag := flag.Bool("v", false, "Print version information and exit")
+	flag.Parse()
+
+	if *versionFlag || *vFlag {
+		fmt.Printf("QQuestio version v%s\n", Version)
+		os.Exit(0)
+	}
+
 	// Set up file-based logging to prevent stdout corruption
 	if f, err := tea.LogToFile("debug.log", "qquestio"); err == nil {
 		defer f.Close()

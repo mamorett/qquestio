@@ -406,7 +406,7 @@ func (m *Model) renderHeader() string {
 
 	// Line 1: Program Name and Status
 	statusStr := fmt.Sprintf("[%s] %s", statusText, m.statusMsg)
-	leftText := fmt.Sprintf(" ◉ QQuestio  %s%s", indicator, statusStyle.Render(statusStr))
+	leftText := fmt.Sprintf(" ◉ QQuestio v%s  %s%s", Version, indicator, statusStyle.Render(statusStr))
 	line1Left := styles.Header.Render(leftText)
 
 	tagRender := styles.CollectionTag.Render(m.collection)
