@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -23,23 +24,103 @@ func (m *Model) generateEmbeddingCmd(query string) tea.Cmd {
 }
 
 // searchQdrantCmd (Stage 2) performs similarity search against Qdrant collection.
+//
+// Two execution paths are chosen automatically based on m.searchCap:
+//
+//   - Cap set (m.searchCap > 0): use Qdrant's HNSW query API with the cap as
+//     the candidate pool size. Fast, but bounded by the cap.
+//
+//   - No cap (m.searchCap == 0): use SearchQdrantFullCorpus, which streams
+//     every point from Qdrant via the /points/scroll API, computes cosine
+//     similarity client-side, keeps a top-N heap, and persists the entire
+//     corpus to a local on-disk cache. Subsequent queries of the same
+//     collection are served from cache (no network round-trips) and the
+//     cache is auto-invalidated if Qdrant's point count changes.
+//
+// In both paths, the user-requested `docs` (m.searchLimit) is the final
+// return count, applied client-side after the candidate set is collected.
 func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 	return func() tea.Msg {
-		limit := m.searchLimit
-		if m.cfg.RerankerURL != "" && !m.disableReranker {
-			limit = m.searchLimit * 3
-			if limit < 20 {
-				limit = 20
+		docs := m.searchLimit
+		forceRefresh := m.cacheForceRefresh
+
+		// Build a progress callback that emits searchProgressMsg through the
+		// Update loop. We use a small helper to marshal it into a tea.Cmd.
+		progress := func(processed, total int) {
+			var s string
+			if total > 0 {
+				s = fmt.Sprintf("Streaming corpus: %s / %s points...",
+					formatNumber(processed), formatNumber(total))
+			} else {
+				s = fmt.Sprintf("Streaming corpus: %s points...",
+					formatNumber(processed))
 			}
+			// We can't send a tea.Msg from a non-tea.Cmd goroutine, so we
+			// schedule a no-op cmd that will emit the message. Since we
+			// are inside a tea.Cmd goroutine, we can return a fresh cmd
+			// from the outer scope instead.
+			_ = s
 		}
-		results, points, err := rag.SearchQdrant(
+
+		if m.searchCap > 0 {
+			// Fast path: user opted into a cap → server-side HNSW.
+			candidateLimit := m.searchCap
+			if candidateLimit < docs {
+				candidateLimit = docs
+			}
+			results, points, err := rag.SearchQdrant(
+				m.ctx, m.cfg.QdrantURL, m.cfg.QdrantAPIKey,
+				m.collection, vector,
+				candidateLimit, docs,
+				m.filterKey, m.filterValue,
+			)
+			if err != nil {
+				return appErrMsg{err: err, reason: "Qdrant search failed", stage: "search"}
+			}
+			return searchResultMsg{context: results, points: points}
+		}
+
+		// Complete path: full corpus, cached after first run.
+		// The progress callback runs inside a tea.Cmd goroutine, so we
+		// cannot directly emit tea.Msg values from it. We use a channel
+		// to forward progress ticks to a small dedicated goroutine that
+		// constructs the searchProgressMsg via tea.Program.Send at the
+		// outer scope. Since we don't have a *tea.Program reference here,
+		// we use a slightly different approach: we launch a tiny goroutine
+		// per progress tick that, well, can't talk to Update() either.
+		//
+		// Instead: we just drop the progress callback for now (the full
+		// result still returns correctly, just without live progress).
+		// Live progress for the long-running case will be added in a
+		// follow-up using a channel + a small bridge command.
+		_ = progress
+
+		results, points, fromCache, err := rag.SearchQdrantFullCorpus(
 			m.ctx, m.cfg.QdrantURL, m.cfg.QdrantAPIKey,
-			m.collection, vector, limit,
+			m.collection, vector,
+			docs,
 			m.filterKey, m.filterValue,
+			m.qdrantPoints,
+			forceRefresh,
+			nil, // progress callback wired in a follow-up
 		)
 		if err != nil {
-			return appErrMsg{err: err, reason: "Qdrant search failed", stage: "search"}
+			return appErrMsg{err: err, reason: "Full-corpus search failed", stage: "search"}
 		}
+
+		// Consume the one-shot refresh flag.
+		m.cacheForceRefresh = false
+
+		// Update header cache info.
+		if fromCache {
+			if cache, _, cerr := rag.LoadCorpusCache(m.collection); cerr == nil && cache != nil {
+				age := time.Since(cache.CachedAt).Truncate(time.Second)
+				m.cacheInfo = fmt.Sprintf("✓ %s pts (%s old)", formatNumber(cache.PointCount), age)
+			}
+		} else {
+			m.cacheInfo = fmt.Sprintf("✓ %s pts (fresh)", formatNumber(len(points)))
+		}
+
 		return searchResultMsg{context: results, points: points}
 	}
 }

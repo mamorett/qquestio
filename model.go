@@ -20,22 +20,22 @@ import (
 type appState int
 
 const (
-	stateIdle appState = iota // Waiting for user input
-	stateEmbedding            // Generating embedding vector
-	stateSearching            // Querying Qdrant
-	stateReranking            // Reranking retrieved documents
-	stateStreaming            // Receiving LLM SSE chunks
-	stateError                // Displaying error, input still active
+	stateIdle      appState = iota // Waiting for user input
+	stateEmbedding                 // Generating embedding vector
+	stateSearching                 // Querying Qdrant
+	stateReranking                 // Reranking retrieved documents
+	stateStreaming                 // Receiving LLM SSE chunks
+	stateError                     // Displaying error, input still active
 )
 
 type ConversationTurn struct {
-	Role                    string             // "user" | "assistant" | "system"
-	Content                 string             // The text content
-	References              []rag.QdrantPoint  // Retrieved context points (only for assistant responses)
-	RenderedContent         string             // Cached rendered markdown
-	RenderedWidth           int                // The width at which it was rendered
-	RenderedReferences      string             // Cached rendered references block
-	RenderedReferencesWidth int                // The width at which references were rendered
+	Role                    string            // "user" | "assistant" | "system"
+	Content                 string            // The text content
+	References              []rag.QdrantPoint // Retrieved context points (only for assistant responses)
+	RenderedContent         string            // Cached rendered markdown
+	RenderedWidth           int               // The width at which it was rendered
+	RenderedReferences      string            // Cached rendered references block
+	RenderedReferencesWidth int               // The width at which references were rendered
 }
 
 type Model struct {
@@ -43,13 +43,16 @@ type Model struct {
 	cfg Config
 
 	// --- Runtime state (mutable via slash commands) ---
-	collection   string // Active Qdrant collection (init: cfg.DefaultCollection)
-	searchLimit  int    // Number of Qdrant results (default: 5)
-	systemPrompt string // Custom system prompt (default: built-in RAG prompt)
-	ragMode         string // RAG mode: "strict" or "hybrid"
-	filterKey       string // Active filter metadata key
-	filterValue     string // Active filter metadata value
-	disableReranker bool   // Toggle to bypass reranker step
+	collection        string // Active Qdrant collection (init: cfg.DefaultCollection)
+	searchLimit       int    // Number of Qdrant results (default: 5)
+	searchCap         int    // Hard upper bound on candidate pool for Qdrant search (0 = no cap, search full corpus)
+	systemPrompt      string // Custom system prompt (default: built-in RAG prompt)
+	ragMode           string // RAG mode: "strict" or "hybrid"
+	filterKey         string // Active filter metadata key
+	filterValue       string // Active filter metadata value
+	disableReranker   bool   // Toggle to bypass reranker step
+	cacheForceRefresh bool   // When true, the next full-corpus search re-scrolls Qdrant (set by /cache refresh, auto-cleared after one use)
+	cacheInfo         string // Last known cache summary for header display (e.g. "✓ 1.2M pts, 2m ago")
 
 	// --- FSM ---
 	state appState
@@ -66,13 +69,13 @@ type Model struct {
 	showRawSource bool               // Toggle between glamour-rendered markdown and raw markdown source
 
 	// --- Pipeline transient ---
-	lastQuery     string             // The user query that started the pipeline
-	ragContext    string             // Retrieved text from Qdrant (current turn)
-	lastPoints    []rag.QdrantPoint  // Retrieved points from Qdrant (current turn)
+	lastQuery     string            // The user query that started the pipeline
+	ragContext    string            // Retrieved text from Qdrant (current turn)
+	lastPoints    []rag.QdrantPoint // Retrieved points from Qdrant (current turn)
 	cancelRequest context.CancelFunc
 	streamReader  *rag.SSEReader
-	escCount      int                // consecutive Esc presses
-	stoppedByUser bool               // explicit user abort flag
+	escCount      int  // consecutive Esc presses
+	stoppedByUser bool // explicit user abort flag
 
 	// --- Qdrant Collection Stats ---
 	qdrantPoints  int
@@ -112,19 +115,20 @@ func NewModel(ctx context.Context, cfg Config) *Model {
 	vp.Style = lipgloss.NewStyle().Background(nord0).Foreground(nord4)
 
 	return &Model{
-		cfg:          cfg,
-		collection:   cfg.DefaultCollection,
-		searchLimit:  10,
-		state:        stateIdle,
-		textInput:    ti,
-		viewport:     vp,
-		spinner:      s,
-		statusMsg:    "Ready",
-		skills:       NewSkillRegistry(),
-		ctx:          ctx,
-		ragMode:      "strict",
-		filterKey:    "",
-		filterValue:  "",
+		cfg:             cfg,
+		collection:      cfg.DefaultCollection,
+		searchLimit:     10,
+		searchCap:       cfg.SearchCap,
+		state:           stateIdle,
+		textInput:       ti,
+		viewport:        vp,
+		spinner:         s,
+		statusMsg:       "Ready",
+		skills:          NewSkillRegistry(),
+		ctx:             ctx,
+		ragMode:         "strict",
+		filterKey:       "",
+		filterValue:     "",
 		disableReranker: false,
 	}
 }
@@ -348,6 +352,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateViewport()
 		}
 
+	case searchProgressMsg:
+		// Transient status update from the full-corpus search loop.
+		// Just refresh the header; do not touch FSM state or history.
+		m.statusMsg = msg.status
+		m.updateViewport()
+
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		headerH := 4
@@ -478,12 +488,27 @@ func (m *Model) renderHeader() string {
 
 	modeView := lipgloss.NewStyle().Foreground(modeColor).Bold(true).Render(m.ragMode)
 
-	qdrantInfo := fmt.Sprintf(" %s %s  %s  %s %s  %s %s %d  %s  %s %s%s",
+	// Cap display: "none" when unset (0) for full-corpus search, otherwise the integer value
+	capText := "none"
+	if m.searchCap > 0 {
+		capText = fmt.Sprintf("%d", m.searchCap)
+	}
+
+	cacheText := "—"
+	if m.cacheInfo != "" {
+		cacheText = m.cacheInfo
+	}
+
+	qdrantInfo := fmt.Sprintf(" %s %s  %s  %s %s  %s %s %d  %s  %s %s  %s  %s %s  %s  %s %s%s",
 		labelStyle.Render("DB:"), valueStyle.Render(m.cfg.QdrantURL),
 		delimStyle.Render("│"),
 		labelStyle.Render("Col:"), valueStyle.Render(m.collection),
 		delimStyle.Render("│"),
 		labelStyle.Render("Limit:"), m.searchLimit,
+		delimStyle.Render("│"),
+		labelStyle.Render("Cap:"), valueStyle.Render(capText),
+		delimStyle.Render("│"),
+		labelStyle.Render("Cache:"), valueStyle.Render(cacheText),
 		delimStyle.Render("│"),
 		labelStyle.Render("Mode:"), modeView,
 		statsStr,
@@ -604,7 +629,7 @@ func (m *Model) updateViewport() {
 			// Add a horizontal rule separating turns
 			sb.WriteString(lipgloss.NewStyle().Foreground(nord3).Render(strings.Repeat("─", m.width-4)) + "\n\n")
 		} else if turn.Role == "system" {
-			sb.WriteString(lipgloss.NewStyle().Foreground(nord13).Italic(true).Render("ℹ " + turn.Content) + "\n\n")
+			sb.WriteString(lipgloss.NewStyle().Foreground(nord13).Italic(true).Render("ℹ "+turn.Content) + "\n\n")
 			sb.WriteString(lipgloss.NewStyle().Foreground(nord3).Render(strings.Repeat("─", m.width-4)) + "\n\n")
 		}
 	}
@@ -914,7 +939,7 @@ func formatReferences(points []rag.QdrantPoint, width int) string {
 			sb.WriteString(lipgloss.NewStyle().Foreground(nord11).Italic(true).Render("      (No text payload content found in this point)") + "\n")
 		}
 		if i < len(points)-1 {
-			sb.WriteString(borderStyle.Render("    " + strings.Repeat("┄", width-8)) + "\n")
+			sb.WriteString(borderStyle.Render("    "+strings.Repeat("┄", width-8)) + "\n")
 		}
 	}
 	return sb.String()
@@ -1000,6 +1025,34 @@ func isHexHash(s string) bool {
 		}
 	}
 	return true
+}
+
+// formatNumber formats an integer with thousands separators (e.g. 1234567 -> "1,234,567").
+// Used for human-readable progress and stats messages in the header / status bar.
+func formatNumber(n int) string {
+	if n < 0 {
+		return "-" + formatNumber(-n)
+	}
+	s := fmt.Sprintf("%d", n)
+	if len(s) <= 3 {
+		return s
+	}
+	// Insert commas from the right.
+	var b strings.Builder
+	pre := len(s) % 3
+	if pre > 0 {
+		b.WriteString(s[:pre])
+		if len(s) > pre {
+			b.WriteString(",")
+		}
+	}
+	for i := pre; i < len(s); i += 3 {
+		b.WriteString(s[i : i+3])
+		if i+3 < len(s) {
+			b.WriteString(",")
+		}
+	}
+	return b.String()
 }
 
 // renderMarkdown converts raw markdown into styled terminal output using Glamour.

@@ -14,6 +14,7 @@ func main() {
 	// Parse version flags
 	versionFlag := flag.Bool("version", false, "Print version information and exit")
 	vFlag := flag.Bool("v", false, "Print version information and exit")
+	searchCapFlag := flag.Int("search-cap", -1, "Maximum candidate pool for Qdrant search (-1 = no CLI override, 0 = no cap, N = cap to N)")
 	flag.Parse()
 
 	if *versionFlag || *vFlag {
@@ -30,6 +31,11 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Config error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// CLI flag takes highest precedence for the initial cap (only if explicitly set)
+	if *searchCapFlag >= 0 {
+		cfg.SearchCap = *searchCapFlag
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)

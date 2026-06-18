@@ -60,3 +60,11 @@ type systemLogMsg struct {
 
 // quitMsg is returned when a /quit command is executed.
 type quitMsg struct{}
+
+// searchProgressMsg is a transient status update emitted by the
+// long-running full-corpus search. It updates the header status bar
+// (e.g. "Streaming corpus: 234,567 / 1,200,000 points...") without
+// polluting the conversation history or advancing the FSM.
+type searchProgressMsg struct {
+	status string
+}

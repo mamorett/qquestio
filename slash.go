@@ -7,6 +7,8 @@ import (
 
 	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"qquestio/internal/rag"
 )
 
 // handleSlashCmd parses and dispatches slash commands.
@@ -100,6 +102,62 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				return slashResultMsg{feedback: fmt.Sprintf("Filter applied → [any document field] = %s", val)}
 			}
 			return slashResultMsg{feedback: fmt.Sprintf("Filter applied → %s = %s", key, val)}
+
+		case "/cap":
+			if len(args) == 0 {
+				// Show current cap
+				if m.searchCap <= 0 {
+					return slashResultMsg{feedback: "Search cap → none (searches full corpus)"}
+				}
+				return slashResultMsg{feedback: fmt.Sprintf("Search cap → %d", m.searchCap)}
+			}
+			arg := strings.ToLower(strings.TrimSpace(args[0]))
+			if arg == "off" || arg == "none" || arg == "unlimited" {
+				m.searchCap = 0
+				return slashResultMsg{feedback: "Search cap cleared (searches full corpus)"}
+			}
+			n, err := strconv.Atoi(args[0])
+			if err != nil || n < 1 {
+				return appErrMsg{
+					err:    fmt.Errorf("/cap requires a positive integer, or 'off'"),
+					reason: "Usage: /cap <N>  (e.g. /cap 50000)  or  /cap off",
+					stage:  "slash",
+				}
+			}
+			m.searchCap = n
+			return slashResultMsg{feedback: fmt.Sprintf("Search cap → %d (candidate pool limited to top-%d before returning %d docs)", n, n, m.searchLimit)}
+
+		case "/cache":
+			if len(args) == 0 || args[0] == "status" {
+				info, err := rag.CacheInfo(m.collection)
+				if err != nil {
+					return appErrMsg{err: err, reason: "Failed to read cache info", stage: "slash"}
+				}
+				dir := rag.CacheDir()
+				return systemLogMsg{
+					content:  fmt.Sprintf("Cache directory: %s\nCollection: %s\nStatus: %s", dir, m.collection, info),
+					feedback: fmt.Sprintf("Cache status for %s", m.collection),
+				}
+			}
+			if args[0] == "refresh" {
+				m.cacheForceRefresh = true
+				return slashResultMsg{feedback: "Cache refresh armed: next full-corpus query will re-scroll Qdrant"}
+			}
+			if args[0] == "clear" {
+				if err := rag.DeleteCorpusCache(m.collection); err != nil {
+					return appErrMsg{err: err, reason: "Failed to delete cache", stage: "slash"}
+				}
+				m.cacheInfo = ""
+				return slashResultMsg{feedback: fmt.Sprintf("Cache cleared for %s", m.collection)}
+			}
+			if args[0] == "dir" {
+				return slashResultMsg{feedback: fmt.Sprintf("Cache dir: %s", rag.CacheDir())}
+			}
+			return appErrMsg{
+				err:    fmt.Errorf("unknown /cache subcommand: %s", args[0]),
+				reason: "Usage: /cache [status|refresh|clear|dir]",
+				stage:  "slash",
+			}
 
 		case "/rerank":
 			if len(args) != 1 {
@@ -198,6 +256,8 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 			helpText := "Available Slash Commands:\n" +
 				"  /collection <name>  - Switch the active Qdrant collection\n" +
 				"  /limit <1-100>      - Set the number of context documents to retrieve\n" +
+				"  /cap [N|off]        - Set/clear the candidate pool cap (0/no cap = full corpus)\n" +
+				"  /cache [status|refresh|clear|dir] - Inspect or control the on-disk corpus cache\n" +
 				"  /filter [key] <val> - Filter search (e.g. '/filter file_name guide.txt' or '/filter guide.txt')\n" +
 				"  /rerank <on|off>    - Enable/disable the reranker step\n" +
 				"  /mode <strict|hybrid>- Switch RAG mode (strict closed-book vs hybrid general-knowledge)\n" +

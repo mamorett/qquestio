@@ -52,7 +52,7 @@ func TestSearchQdrant(t *testing.T) {
 	}))
 	defer server1.Close()
 
-	res1, pts1, err := SearchQdrant(context.Background(), server1.URL, "secret", "my-col", []float32{0.1}, 5, "", "")
+	res1, pts1, err := SearchQdrant(context.Background(), server1.URL, "secret", "my-col", []float32{0.1}, 1000, 5, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestSearchQdrant(t *testing.T) {
 	}))
 	defer server2.Close()
 
-	res2, pts2, err := SearchQdrant(context.Background(), server2.URL, "secret", "my-col", []float32{0.1}, 5, "", "")
+	res2, pts2, err := SearchQdrant(context.Background(), server2.URL, "secret", "my-col", []float32{0.1}, 1000, 5, "", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestSearchQdrant_Filter(t *testing.T) {
 	}))
 	defer serverDoc.Close()
 
-	_, _, err := SearchQdrant(context.Background(), serverDoc.URL, "secret", "my-col", []float32{0.1}, 5, "file_name", "guide.txt")
+	_, _, err := SearchQdrant(context.Background(), serverDoc.URL, "secret", "my-col", []float32{0.1}, 1000, 5, "file_name", "guide.txt")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -299,9 +299,160 @@ func TestSearchQdrant_Filter(t *testing.T) {
 	}))
 	defer serverNonDoc.Close()
 
-	_, _, err = SearchQdrant(context.Background(), serverNonDoc.URL, "secret", "my-col", []float32{0.1}, 5, "chunk_index", "5")
+	_, _, err = SearchQdrant(context.Background(), serverNonDoc.URL, "secret", "my-col", []float32{0.1}, 1000, 5, "chunk_index", "5")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
+func TestCorpusCache_SaveLoad(t *testing.T) {
+	// Override the cache dir for this test.
+	tmpDir := t.TempDir()
+	t.Setenv("QQUESTIO_CACHE_DIR", tmpDir)
+	collection := "test_collection-save.load"
+
+	// Build a small fake corpus.
+	dim := 4
+	points := []QdrantPoint{
+		{ID: 1, Payload: map[string]interface{}{"text": "hello", "file_name": "a.txt"}, Vector: []float32{0.1, 0.2, 0.3, 0.4}, Score: 0.99},
+		{ID: "uuid-2", Payload: map[string]interface{}{"text": "world", "file_name": "b.txt"}, Vector: []float32{-0.1, -0.2, -0.3, -0.4}, Score: 0.5},
+		{ID: float64(3), Payload: map[string]interface{}{"text": "goodbye", "file_name": "c.txt"}, Vector: []float32{0.5, 0.5, 0.5, 0.5}, Score: 0.1},
+	}
+
+	if err := SaveCorpusCache(collection, dim, points); err != nil {
+		t.Fatalf("SaveCorpusCache failed: %v", err)
+	}
+
+	cache, loaded, err := LoadCorpusCache(collection)
+	if err != nil {
+		t.Fatalf("LoadCorpusCache failed: %v", err)
+	}
+	if cache == nil {
+		t.Fatal("expected cache, got nil")
+	}
+	if cache.Collection != collection {
+		t.Errorf("expected collection=%q, got %q", collection, cache.Collection)
+	}
+	if cache.PointCount != len(points) {
+		t.Errorf("expected point count %d, got %d", len(points), cache.PointCount)
+	}
+	if cache.Dimension != dim {
+		t.Errorf("expected dim %d, got %d", dim, cache.Dimension)
+	}
+	if len(loaded) != len(points) {
+		t.Fatalf("expected %d loaded points, got %d", len(points), len(loaded))
+	}
+
+	for i, orig := range points {
+		got := loaded[i]
+		// Score is not preserved (recomputed on load); check ID + payload + vector.
+		if fmt.Sprintf("%v", got.ID) != fmt.Sprintf("%v", orig.ID) {
+			t.Errorf("point %d: id mismatch: got %v, want %v", i, got.ID, orig.ID)
+		}
+		if got.Payload["text"] != orig.Payload["text"] {
+			t.Errorf("point %d: text mismatch: got %v, want %v", i, got.Payload["text"], orig.Payload["text"])
+		}
+		if got.Payload["file_name"] != orig.Payload["file_name"] {
+			t.Errorf("point %d: file_name mismatch", i)
+		}
+		if len(got.Vector) != dim {
+			t.Errorf("point %d: vector dim %d, want %d", i, len(got.Vector), dim)
+		}
+		for j, v := range got.Vector {
+			if v != orig.Vector[j] {
+				t.Errorf("point %d vector[%d]: got %v, want %v", i, j, v, orig.Vector[j])
+				break
+			}
+		}
+	}
+}
+
+func TestCorpusCache_LoadMissing(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("QQUESTIO_CACHE_DIR", tmpDir)
+
+	cache, points, err := LoadCorpusCache("nonexistent_collection_xyz")
+	if err != nil {
+		t.Errorf("expected nil error for missing cache, got %v", err)
+	}
+	if cache != nil {
+		t.Errorf("expected nil cache, got %+v", cache)
+	}
+	if points != nil {
+		t.Errorf("expected nil points, got %v", points)
+	}
+}
+
+func TestCorpusCache_Delete(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("QQUESTIO_CACHE_DIR", tmpDir)
+	collection := "test_collection-delete"
+
+	if err := SaveCorpusCache(collection, 2, []QdrantPoint{
+{ID: 1, Payload: map[string]interface{}{"x": "y"}, Vector: []float32{1, 0}},
+}); err != nil {
+		t.Fatalf("SaveCorpusCache failed: %v", err)
+	}
+
+	// Delete should succeed.
+	if err := DeleteCorpusCache(collection); err != nil {
+		t.Fatalf("DeleteCorpusCache failed: %v", err)
+	}
+
+	// Subsequent load should return nil.
+	cache, _, err := LoadCorpusCache(collection)
+	if err != nil {
+		t.Fatalf("LoadCorpusCache after delete failed: %v", err)
+	}
+	if cache != nil {
+		t.Errorf("expected nil cache after delete, got %+v", cache)
+	}
+
+	// Deleting again should be a no-op (no error).
+	if err := DeleteCorpusCache(collection); err != nil {
+		t.Errorf("second DeleteCorpusCache should not error, got %v", err)
+	}
+}
+
+func TestCorpusCache_SafeName(t *testing.T) {
+	// Collection names with unsafe characters should normalize to safe filenames.
+	// This is tested indirectly: SaveCorpusCache with special chars should not crash.
+	tmpDir := t.TempDir()
+	t.Setenv("QQUESTIO_CACHE_DIR", tmpDir)
+
+	collection := "my/unsafe name with spaces & symbols!@#"
+	if err := SaveCorpusCache(collection, 2, []QdrantPoint{
+{ID: 1, Payload: map[string]interface{}{"x": "y"}, Vector: []float32{1, 0}},
+}); err != nil {
+		t.Fatalf("SaveCorpusCache with unsafe name failed: %v", err)
+	}
+
+	cache, _, err := LoadCorpusCache(collection)
+	if err != nil {
+		t.Fatalf("LoadCorpusCache with unsafe name failed: %v", err)
+	}
+	if cache == nil || cache.Collection != collection {
+		t.Errorf("expected collection=%q, got %+v", collection, cache)
+	}
+}
+
+func TestFormatNumber(t *testing.T) {
+	tests := []struct {
+		in   int
+		want string
+	}{
+		{0, "0"},
+		{1, "1"},
+		{999, "999"},
+		{1000, "1,000"},
+		{12345, "12,345"},
+		{1234567, "1,234,567"},
+		{-1234567, "-1,234,567"},
+	}
+	for _, tc := range tests {
+		got := formatNumber(tc.in)
+		if got != tc.want {
+			t.Errorf("formatNumber(%d) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

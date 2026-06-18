@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -20,6 +21,7 @@ type Config struct {
 	RerankerURL       string `json:"reranker_url"`
 	RerankerAPIKey    string `json:"reranker_api_key"`
 	RerankerModel     string `json:"reranker_model"`
+	SearchCap         int    `json:"search_cap,omitempty"`
 }
 
 // loadJSONConfig reads configuration from a config.json file if it exists.
@@ -62,6 +64,11 @@ func LoadConfig() (Config, error) {
 	overrideFromEnv(&cfg.RerankerURL, "RERANKER_URL")
 	overrideFromEnv(&cfg.RerankerAPIKey, "RERANKER_API_KEY")
 	overrideFromEnv(&cfg.RerankerModel, "RERANKER_MODEL")
+	if val := os.Getenv("SEARCH_CAP"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n >= 0 {
+			cfg.SearchCap = n
+		}
+	}
 
 	// 3. Validate and construct super-clear error message if variables are missing
 	var missing []string
