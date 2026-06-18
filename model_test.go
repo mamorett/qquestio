@@ -58,3 +58,24 @@ func TestDoubleEscapeCancel(t *testing.T) {
 		t.Errorf("expected escCount to reset to 0 after other key press, got %d", m.escCount)
 	}
 }
+
+func TestFormatNumber(t *testing.T) {
+	tests := []struct {
+		in   int
+		want string
+	}{
+		{0, "0"},
+		{1, "1"},
+		{999, "999"},
+		{1000, "1,000"},
+		{12345, "12,345"},
+		{1234567, "1,234,567"},
+		{-1234567, "-1,234,567"},
+	}
+	for _, tc := range tests {
+		got := formatNumber(tc.in)
+		if got != tc.want {
+			t.Errorf("formatNumber(%d) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

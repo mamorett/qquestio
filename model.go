@@ -46,6 +46,7 @@ type Model struct {
 	collection        string // Active Qdrant collection (init: cfg.DefaultCollection)
 	searchLimit       int    // Number of Qdrant results (default: 5)
 	searchCap         int    // Hard upper bound on candidate pool for Qdrant search (0 = no cap, search full corpus)
+	searchMode        string // "auto" (default), "exact" (force server-side), or "local" (client-side brute-force using all CPU cores)
 	systemPrompt      string // Custom system prompt (default: built-in RAG prompt)
 	ragMode           string // RAG mode: "strict" or "hybrid"
 	filterKey         string // Active filter metadata key
@@ -119,6 +120,7 @@ func NewModel(ctx context.Context, cfg Config) *Model {
 		collection:      cfg.DefaultCollection,
 		searchLimit:     10,
 		searchCap:       cfg.SearchCap,
+		searchMode:       "auto",
 		state:           stateIdle,
 		textInput:       ti,
 		viewport:        vp,
@@ -138,6 +140,7 @@ func (m *Model) Init() tea.Cmd {
 		textinput.Blink,
 		m.spinner.Tick,
 		m.fetchQdrantInfoCmd(),
+		m.preloadCacheInfoCmd(),
 	)
 }
 
@@ -357,6 +360,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Just refresh the header; do not touch FSM state or history.
 		m.statusMsg = msg.status
 		m.updateViewport()
+
+	case cachePreloadMsg:
+		if msg.found {
+			m.cacheInfo = msg.info
+		}
+
+	case warmupCacheMsg:
+		// Triggered by /cache warmup. Run the scroll-based cache population
+		// in a background command. The FSM stays in stateSearching so the
+		// user sees progress and can Esc-Esc out.
+		m.state = stateSearching
+		m.statusMsg = "Warming up cache (streaming corpus from Qdrant)..."
+		m.updateViewport()
+		cmds = append(cmds, m.warmupCacheCmd())
 
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height

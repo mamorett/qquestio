@@ -11,7 +11,7 @@ Designed around the **Nord color palette**, QQuestio delivers a visually stunnin
 - **Non-Blocking Async Architecture**: Full background execution of HTTP embeddings, vector similarity search, reranking, and SSE stream reading via structured `tea.Cmd` loops.
 - **Real-time SSE Streaming**: High-performance, self-chaining Server-Sent Events parser that prints LLM responses token-by-token directly into a scrollable viewport.
 - **Model-Agnostic Generic Reranking**: Optional, generic, and provider-agnostic reranking step that automatically expands the database candidate pool, query-scores retrieved points, and selects the top documents.
-- **Full-Corpus Recall by Default**: Decouples the Qdrant search scope (the full collection) from the return count (the user-configurable `/limit`), so recall is no longer capped by the number of documents you want to retrieve. An optional `/cap` (or `--search-cap` / `SEARCH_CAP`) provides a hard upper bound for very large corpora.
+- **Full-Corpus Recall by Default**: Uses Qdrant's native exact brute-force search (`params.exact=true`) to score every single vector in the collection server-side, with sub-second latency even for million-scale corpora. An optional `/cap` (or `--search-cap` / `SEARCH_CAP`) switches to HNSW approximate search for reduced latency on extremely large collections.
 - **Dynamic Slash Commands**: Modify parameters at runtime (e.g., active collection, search limits, or system prompt) or copy transcripts without restarting the TUI.
 - **Skills System**: Plug-and-play local tools framework featuring a registry interface and execution dispatcher.
 - **Nord Theme Aesthetics**: Sophisticated, premium color design featuring distinct status bars, responsive padding, and dynamic state transitions.
@@ -112,10 +112,11 @@ Change state parameters or trigger clipboard actions at runtime from the prompt 
 
 - **`/collection <name>`**: Switches the active vector store collection instantly.
 - **`/limit <1-100>`**: Sets the number of context documents (`docs`) to RETRIEVE into the prompt. This is the return-count side of the search; see [Search Scope vs. Return Count](#-search-scope-vs-return-count).
-- **`/cap [N|off]`**: Sets or clears the candidate pool cap. `/cap 50000` caps Qdrant search to the top 50k candidates before truncating to `docs`; `/cap off` (or `/cap 0`) restores full-corpus search; `/cap` alone prints the current value. See [Search Scope vs. Return Count](#-search-scope-vs-return-count).
+- **`/cap [N|off|auto|exact|local]`**: Controls the candidate pool cap and search mode. `/cap 50000` → HNSW approximate top-50k; `/cap off` → no cap, uses Qdrant native brute-force (default); `/cap auto` → let the runtime decide; `/cap exact` → always force server-side brute-force (max Qdrant CPU usage); `/cap local` → force client-side brute-force on all local CPU cores (fallback). `/cap` alone prints the current cap and mode. See [Search Scope vs. Return Count](#-search-scope-vs-return-count).
 - **`/filter <key> <value>`** (or **`/filter clear`**): Filters vector search by exact metadata key-value match (e.g. `/filter file_name guide.txt`).
 - **`/mode <strict|hybrid>`**: Switches between strict closed-book RAG and hybrid general-knowledge RAG modes.
 - **`/rerank <on|off>`**: Enables or bypasses the optional reranker step.
+- **`/cache [status|refresh|warmup|clear|dir]`**: Inspect or control the on-disk corpus cache. `/cache warmup` pre-populates the cache for offline use.
 - **`/system <prompt...>`**: Re-defines the active RAG system instructions for subsequent turns.
 - **`/copy`**: Copies the last assistant response text to the clipboard.
 - **`/copy all`**: Formats and copies the entire clean conversation transcript to the clipboard.
@@ -130,24 +131,25 @@ Change state parameters or trigger clipboard actions at runtime from the prompt 
 
 ## 🔍 Search Scope vs. Return Count
 
-Qdrant's `/points/query` API uses the request `limit` to determine the **search scope** (i.e. how many nearest neighbors Qdrant's HNSW index will compute). A small `limit` therefore destroys recall: Qdrant never even looks at the rest of the corpus.
+QQuestio uses two different search strategies depending on the `cap` setting:
 
-QQuestio **decouples** these two concepts:
+| Strategy | When | How it works |
+|---|---|---|
+| **Exact search** (default) | `cap = 0` or unset | Sends `params.exact=true` to Qdrant's `/points/query` API. Qdrant performs a brute-force scan of the **entire collection** server-side using SIMD-optimized vector math. Sub-second even for millions of vectors. |
+| **HNSW search** | `cap > 0` | Sends the cap as the `limit` to Qdrant's HNSW index. Faster for very large collections, but approximate (may miss some true nearest neighbors). |
 
 | Knob | Meaning | Default | Where to set it |
 |---|---|---|---|
-| **Candidate pool** (`candidateLimit`) | How many candidates Qdrant is asked to consider during the search | The full collection size (or 10k if info not yet fetched) | `search_cap` / `SEARCH_CAP` / `--search-cap` / `/cap` |
+| **Candidate pool** (`candidateLimit`) | How many candidates Qdrant considers during HNSW search (only when capped) | Entire collection (exact search) | `search_cap` / `SEARCH_CAP` / `--search-cap` / `/cap` |
 | **Return count** (`docs`) | How many of the top candidates are actually injected into the LLM prompt | `10` | `/limit` |
-
-In other words: QQuestio always asks Qdrant to consider the **entire corpus** (unless explicitly capped) and then keeps only the **first `docs`** points — sorted by similarity — for the prompt. This maximizes recall and gives the reranker a meaningful pool to work with.
 
 The header bar shows the live values, e.g. `Limit: 10  Cap: none  Mode: strict` or `Limit: 5  Cap: 50000  Mode: hybrid`.
 
 ### When to use `/cap`
 
-- **Leave it unset (default)** if your collection is reasonably sized (≤ a few hundred thousand vectors). Qdrant's HNSW will return the true top-N quickly.
-- **Set `/cap 50000` (or similar)** if you have a multi-million-vector collection and search latency or memory pressure is a concern. The cap bounds the candidate pool, at the cost of some recall.
-- **Use `/cap off`** to restore full-corpus search after a cap was set.
+- **Leave it unset (default)** for most collections. Qdrant's exact search handles millions of vectors in under a second.
+- **Set `/cap 50000` (or similar)** if you have a multi-hundred-million-vector collection and need the fastest possible response.
+- **Use `/cap off`** to restore full-corpus exact search after a cap was set.
 
 ---
 

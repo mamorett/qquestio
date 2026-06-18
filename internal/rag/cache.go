@@ -197,6 +197,7 @@ func parseCacheBytes(collection string, data []byte) (*CorpusCache, []QdrantPoin
 		points = append(points, QdrantPoint{
 			ID:      idVal,
 			Payload: allPayloads[i],
+			Vector:  vec,
 			// Score is meaningless for a cache hit; we will recompute it.
 			Score: 0,
 		})

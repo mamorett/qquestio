@@ -105,27 +105,44 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 
 		case "/cap":
 			if len(args) == 0 {
-				// Show current cap
-				if m.searchCap <= 0 {
-					return slashResultMsg{feedback: "Search cap → none (searches full corpus)"}
+				// Show current cap + mode
+				modeStr := m.searchMode
+				if modeStr == "" {
+					modeStr = "auto"
 				}
-				return slashResultMsg{feedback: fmt.Sprintf("Search cap → %d", m.searchCap)}
+				capStr := "none"
+				if m.searchCap > 0 {
+					capStr = fmt.Sprintf("%d", m.searchCap)
+				}
+				return slashResultMsg{feedback: fmt.Sprintf("Search cap → %s | mode → %s", capStr, modeStr)}
 			}
 			arg := strings.ToLower(strings.TrimSpace(args[0]))
+			// Mode commands first (do not change the numeric cap)
+			switch arg {
+			case "auto":
+				m.searchMode = "auto"
+				return slashResultMsg{feedback: "Search mode → auto (server-side brute-force when cap=0, HNSW when cap>0)"}
+			case "exact":
+				m.searchMode = "exact"
+				return slashResultMsg{feedback: "Search mode → exact (server-side brute-force via params.exact=true — MAX SPEED, full Qdrant CPU)"}
+			case "local":
+				m.searchMode = "local"
+				return slashResultMsg{feedback: "Search mode → local (client-side brute-force on all local CPU cores — fallback for when Qdrant refuses params.exact=true)"}
+			}
 			if arg == "off" || arg == "none" || arg == "unlimited" {
 				m.searchCap = 0
-				return slashResultMsg{feedback: "Search cap cleared (searches full corpus)"}
+				return slashResultMsg{feedback: "Search cap cleared (searches full corpus via Qdrant brute-force by default)"}
 			}
 			n, err := strconv.Atoi(args[0])
 			if err != nil || n < 1 {
 				return appErrMsg{
-					err:    fmt.Errorf("/cap requires a positive integer, or 'off'"),
-					reason: "Usage: /cap <N>  (e.g. /cap 50000)  or  /cap off",
+					err:    fmt.Errorf("/cap requires a positive integer, 'off', or a mode: 'auto' | 'exact' | 'local'"),
+					reason: "Usage: /cap <N> | /cap off | /cap auto | /cap exact | /cap local",
 					stage:  "slash",
 				}
 			}
 			m.searchCap = n
-			return slashResultMsg{feedback: fmt.Sprintf("Search cap → %d (candidate pool limited to top-%d before returning %d docs)", n, n, m.searchLimit)}
+			return slashResultMsg{feedback: fmt.Sprintf("Search cap → %d (HNSW candidate pool limited to top-%d before returning %d docs)", n, n, m.searchLimit)}
 
 		case "/cache":
 			if len(args) == 0 || args[0] == "status" {
@@ -143,6 +160,9 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				m.cacheForceRefresh = true
 				return slashResultMsg{feedback: "Cache refresh armed: next full-corpus query will re-scroll Qdrant"}
 			}
+			if args[0] == "warmup" {
+				return warmupCacheMsg{}
+			}
 			if args[0] == "clear" {
 				if err := rag.DeleteCorpusCache(m.collection); err != nil {
 					return appErrMsg{err: err, reason: "Failed to delete cache", stage: "slash"}
@@ -155,7 +175,7 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 			}
 			return appErrMsg{
 				err:    fmt.Errorf("unknown /cache subcommand: %s", args[0]),
-				reason: "Usage: /cache [status|refresh|clear|dir]",
+				reason: "Usage: /cache [status|refresh|warmup|clear|dir]",
 				stage:  "slash",
 			}
 
@@ -257,7 +277,7 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				"  /collection <name>  - Switch the active Qdrant collection\n" +
 				"  /limit <1-100>      - Set the number of context documents to retrieve\n" +
 				"  /cap [N|off]        - Set/clear the candidate pool cap (0/no cap = full corpus)\n" +
-				"  /cache [status|refresh|clear|dir] - Inspect or control the on-disk corpus cache\n" +
+				"  /cache [status|refresh|warmup|clear|dir] - Inspect or control the on-disk corpus cache\n" +
 				"  /filter [key] <val> - Filter search (e.g. '/filter file_name guide.txt' or '/filter guide.txt')\n" +
 				"  /rerank <on|off>    - Enable/disable the reranker step\n" +
 				"  /mode <strict|hybrid>- Switch RAG mode (strict closed-book vs hybrid general-knowledge)\n" +

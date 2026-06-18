@@ -68,3 +68,15 @@ type quitMsg struct{}
 type searchProgressMsg struct {
 	status string
 }
+
+// cachePreloadMsg is returned by preloadCacheInfoCmd on startup to update
+// the header bar with cached corpus information (if a cache file exists).
+type cachePreloadMsg struct {
+	found      bool
+	info       string
+	pointCount int
+}
+
+// warmupCacheMsg signals that the user requested a /cache warmup and the
+// scroll-based cache population should begin.
+type warmupCacheMsg struct{}
