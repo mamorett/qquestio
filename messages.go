@@ -8,15 +8,27 @@ type embeddingMsg struct {
 }
 
 // searchResultMsg is Phase 2 (Stage 2 result): retrieved context from Qdrant.
+//
+// In addition to the joined context and the full points list (already
+// expanded when applicable), we also carry the primary top-N matches and
+// the cached expansion map. This lets the rerank step rerank only the
+// primaries (not the already-expanded set) and then re-apply ±expand
+// around the reranked top-K via ApplyExpansionToPrimaries, so /expand
+// is preserved through the rerank path.
 type searchResultMsg struct {
-	context string            // Concatenated text payloads from Qdrant results
-	points  []rag.QdrantPoint // The full points list with scores/metadata
+	context       string            // Concatenated text payloads (post-expansion) from Qdrant
+	points        []rag.QdrantPoint // The full expanded points list with scores/metadata
+	primaryPoints []rag.QdrantPoint // The top-N primary matches (pre-expansion) for rerank
+	expansionMap  rag.ExpansionMap  // docID → chunk_index → point, for post-rerank re-expansion
+	expand        int               // The expand value used in this search (so rerank can re-apply)
 }
 
-// rerankResultMsg is the result of the optional reranking step.
+// rerankResultMsg is the result of the optional reranking step. It carries
+// the reranked + re-expanded set so the LLM sees the full document context
+// around the reranked top-K, not just the top-K fragments.
 type rerankResultMsg struct {
-	context string            // Concatenated text payloads after reranking
-	points  []rag.QdrantPoint // Sorted and sliced points list
+	context string            // Concatenated text payloads after rerank + re-expansion
+	points  []rag.QdrantPoint // Sorted, re-expanded points list
 }
 
 // streamChunkMsg is Phase 3 (Stage 3): one chunk from LiteLLM SSE stream.

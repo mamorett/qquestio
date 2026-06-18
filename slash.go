@@ -179,6 +179,40 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				stage:  "slash",
 			}
 
+		case "/expand":
+			if len(args) == 0 {
+				// Show current value.
+				if m.searchExpand == 0 {
+					return slashResultMsg{feedback: "Context expand → off (top-N only, no adjacent chunks)"}
+				}
+				return slashResultMsg{feedback: fmt.Sprintf("Context expand → ±%d adjacent chunks per match", m.searchExpand)}
+			}
+			arg := strings.ToLower(strings.TrimSpace(args[0]))
+			if arg == "off" || arg == "none" || arg == "0" {
+				m.searchExpand = 0
+				return slashResultMsg{feedback: "Context expand → off (legacy top-N only)"}
+			}
+			n, err := strconv.Atoi(args[0])
+			if err != nil || n < 0 {
+				return appErrMsg{
+					err:    fmt.Errorf("/expand requires a non-negative integer or 'off'"),
+					reason: "Usage: /expand <N> | /expand off  (0 = off, 1 = ±1, 2 = ±2, ...)",
+					stage:  "slash",
+				}
+			}
+			if n > 20 {
+				return appErrMsg{
+					err:    fmt.Errorf("/expand value too large: %d", n),
+					reason: "Expand must be between 0 and 20 (each ±N pull adds chunks and slows the query)",
+					stage:  "slash",
+				}
+			}
+			m.searchExpand = n
+			if n == 0 {
+				return slashResultMsg{feedback: "Context expand → off (legacy top-N only)"}
+			}
+			return slashResultMsg{feedback: fmt.Sprintf("Context expand → ±%d adjacent chunks per match from the same document", n)}
+
 		case "/rerank":
 			if len(args) != 1 {
 				return appErrMsg{
@@ -276,6 +310,7 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 			helpText := "Available Slash Commands:\n" +
 				"  /collection <name>  - Switch the active Qdrant collection\n" +
 				"  /limit <1-100>      - Set the number of context documents to retrieve\n" +
+				"  /expand <N|off>     - ±N adjacent chunks from the same doc per match (0=off, 1=default)\n" +
 				"  /cap [N|off]        - Set/clear the candidate pool cap (0/no cap = full corpus)\n" +
 				"  /cache [status|refresh|warmup|clear|dir] - Inspect or control the on-disk corpus cache\n" +
 				"  /filter [key] <val> - Filter search (e.g. '/filter file_name guide.txt' or '/filter guide.txt')\n" +
