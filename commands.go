@@ -244,6 +244,19 @@ func (m *Model) warmupCacheCmd() tea.Cmd {
 	}
 }
 
+// executeSkillCmd runs the named skill asynchronously.
+func (m *Model) executeSkillCmd(name, args string) tea.Cmd {
+	return func() tea.Msg {
+		skill, ok := m.skills.Get(name)
+		if !ok {
+			return skillResultMsg{err: fmt.Errorf("skill not found: %s", name)}
+		}
+		res, err := skill.Execute(m.ctx, []byte(args))
+		return skillResultMsg{name: name, input: args, output: res, err: err}
+	}
+}
+
+
 // rerankPointsCmd (Optional Stage 2.5) reranks the retrieved Qdrant points
 // using a generic reranker. Critically, it now:
 //
@@ -375,6 +388,14 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 				"4. COMPULSORY SOURCE CITATION: Every claim, statement of fact, or explanation you write must be directly followed by an inline citation to its source document and chunk (e.g. '[Document: filename | Chunk X]'). If a statement cannot be cited, do not write it.\n" +
 				"5. HIGHEST GROUNDING FIDELITY: Treat the retrieved context as the absolute and only source of truth. Prioritize absolute factual correctness over creative writing or helpfulness."
 		}
+	}
+	if toolPrompt := m.skills.ForPrompt(); toolPrompt != "" {
+		system += "\n\n" + toolPrompt + "\n" +
+			"If you decide to use any of the available tools, you must output a tool call block using the exact syntax:\n" +
+			"CALL: <tool_name> <arguments>\n" +
+			"For example:\n" +
+			"CALL: bash ls -la\n" +
+			"Do not output anything else when calling a tool. Stop generating immediately after outputting the CALL block."
 	}
 	msgs = append(msgs, rag.ChatMessage{Role: "system", Content: system})
 

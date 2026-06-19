@@ -290,25 +290,60 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case streamChunkMsg:
 		if msg.done {
-			// Stream complete
-			m.state = stateIdle
-			m.statusMsg = "Ready"
-			m.history = append(m.history,
-				ConversationTurn{Role: "user", Content: m.lastQuery},
-				ConversationTurn{Role: "assistant", Content: cleanLLMOutput(m.output), References: m.lastPoints},
-			)
-			m.lastQuery = ""
-			m.output = ""
-			m.updateViewport()
-			if m.streamReader != nil {
-				_ = m.streamReader.Close()
-				m.streamReader = nil
+			// Check if output contains a tool call
+			if name, args, ok := ParseCall(m.output); ok {
+				m.statusMsg = fmt.Sprintf("Executing skill '%s'...", name)
+				cleanedOutput := cleanLLMOutput(m.output)
+				if cleanedOutput == "" {
+					cleanedOutput = m.output
+				}
+				m.history = append(m.history,
+					ConversationTurn{Role: "user", Content: m.lastQuery},
+					ConversationTurn{Role: "assistant", Content: cleanedOutput, References: m.lastPoints},
+				)
+				m.updateViewport()
+				cmds = append(cmds, m.executeSkillCmd(name, args))
+			} else {
+				// Stream complete
+				m.state = stateIdle
+				m.statusMsg = "Ready"
+				m.history = append(m.history,
+					ConversationTurn{Role: "user", Content: m.lastQuery},
+					ConversationTurn{Role: "assistant", Content: cleanLLMOutput(m.output), References: m.lastPoints},
+				)
+				m.lastQuery = ""
+				m.output = ""
+				m.updateViewport()
+				if m.streamReader != nil {
+					_ = m.streamReader.Close()
+					m.streamReader = nil
+				}
 			}
 		} else {
 			m.output += msg.content
 			m.updateViewport()
 			cmds = append(cmds, m.receiveStreamChunkCmd())
 		}
+
+	case skillResultMsg:
+		if msg.err != nil {
+			m.state = stateError
+			m.statusMsg = fmt.Sprintf("Skill error: %v", msg.err)
+			m.lastQuery = ""
+			m.output = ""
+			if m.streamReader != nil {
+				_ = m.streamReader.Close()
+				m.streamReader = nil
+			}
+			break
+		}
+		// Skill succeeded! Transition back to streaming to complete the answer.
+		toolResponse := fmt.Sprintf("Tool %s executed. Result:\n%s", msg.name, msg.output)
+		m.lastQuery = toolResponse
+		m.output = ""
+		m.state = stateStreaming
+		m.statusMsg = fmt.Sprintf("Generating response (resumed after '%s')...", msg.name)
+		cmds = append(cmds, m.startLLMStreamCmd())
 
 	case appErrMsg:
 		if m.stoppedByUser {

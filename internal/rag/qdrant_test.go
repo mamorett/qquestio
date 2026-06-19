@@ -370,7 +370,7 @@ func TestSearchWithContextExpansion(t *testing.T) {
 
 	const limit = 1
 	const expand = 1
-	contextStr, points, err := SearchWithContextExpansion(
+	res, err := SearchWithContextExpansionDetailed(
 		ctx,
 		srv.URL, "",
 		"test_collection",
@@ -379,8 +379,10 @@ func TestSearchWithContextExpansion(t *testing.T) {
 		"", "",
 	)
 	if err != nil {
-		t.Fatalf("SearchWithContextExpansion returned error: %v", err)
+		t.Fatalf("SearchWithContextExpansionDetailed returned error: %v", err)
 	}
+	contextStr := res.Context
+	points := res.ExpandedPoints
 
 	if len(points) == 0 {
 		t.Fatalf("expected non-empty points, got 0")
@@ -425,7 +427,7 @@ func TestSearchWithContextExpansionExpandOff(t *testing.T) {
 
 	const limit = 1
 	const expand = 0
-	contextStr, _, err := SearchWithContextExpansion(
+	res, err := SearchWithContextExpansionDetailed(
 		ctx,
 		srv.URL, "",
 		"test_collection",
@@ -434,8 +436,9 @@ func TestSearchWithContextExpansionExpandOff(t *testing.T) {
 		"", "",
 	)
 	if err != nil {
-		t.Fatalf("SearchWithContextExpansion returned error: %v", err)
+		t.Fatalf("SearchWithContextExpansionDetailed returned error: %v", err)
 	}
+	contextStr := res.Context
 
 	// With expand=0, we should have ONLY the primary match.
 	// It should contain one of the answer halves but not both.
@@ -459,7 +462,7 @@ func TestSearchWithContextExpansionEmptyCorpus(t *testing.T) {
 	defer cancel()
 
 	query := []float32{0.1, 0.2, 0.3, 0.4}
-	_, points, err := SearchWithContextExpansion(
+	res, err := SearchWithContextExpansionDetailed(
 		ctx,
 		srv.URL, "",
 		"empty",
@@ -468,8 +471,9 @@ func TestSearchWithContextExpansionEmptyCorpus(t *testing.T) {
 		"", "",
 	)
 	if err != nil {
-		t.Fatalf("SearchWithContextExpansion on empty corpus returned error: %v", err)
+		t.Fatalf("SearchWithContextExpansionDetailed on empty corpus returned error: %v", err)
 	}
+	points := res.ExpandedPoints
 	if len(points) != 0 {
 		t.Errorf("expected 0 points for empty corpus, got %d", len(points))
 	}

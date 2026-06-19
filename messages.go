@@ -92,3 +92,12 @@ type cachePreloadMsg struct {
 // warmupCacheMsg signals that the user requested a /cache warmup and the
 // scroll-based cache population should begin.
 type warmupCacheMsg struct{}
+
+// skillResultMsg is the result of executing a local tool / skill.
+type skillResultMsg struct {
+	name   string
+	input  string
+	output string
+	err    error
+}
+
