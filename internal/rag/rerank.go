@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -46,17 +47,25 @@ func Rerank(ctx context.Context, baseURL, apiKey, model, query string, texts []s
 		}
 	}
 
-	// Build a generic request body containing both texts and documents for maximum compatibility
+	// 1. Try with documents first (standard for Cohere, Jina, llama.cpp, LiteLLM)
 	reqBody := RerankRequest{
 		Model:     model,
 		Query:     query,
 		Documents: texts,
-		Texts:     texts,
 	}
 
 	jsonBytes, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal rerank request: %w", err)
+	}
+
+	log.Printf("[Rerank] Requesting rerank (using documents field) from URL: %s, model: %s (query len: %d, documents: %d)", url, model, len(query), len(texts))
+	if len(texts) > 0 {
+		preview := texts[0]
+		if len(preview) > 60 {
+			preview = preview[:60] + "..."
+		}
+		log.Printf("[Rerank]   doc[0] preview: %q", preview)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBytes))
@@ -75,6 +84,38 @@ func Rerank(ctx context.Context, baseURL, apiKey, model, query string, texts []s
 	if err != nil {
 		return nil, fmt.Errorf("rerank request failed: %w", err)
 	}
+
+	// If the server rejected it due to schema validation (status 400 or 422),
+	// retry using the 'texts' field (standard for HuggingFace TEI).
+	if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity {
+		resp.Body.Close()
+		log.Printf("[Rerank] Server returned status %d. Retrying with texts field (TEI compatibility)...", resp.StatusCode)
+
+		reqBodyTexts := RerankRequest{
+			Model: model,
+			Query: query,
+			Texts: texts,
+		}
+		jsonBytes, err = json.Marshal(reqBodyTexts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal retry rerank request: %w", err)
+		}
+
+		req, err = http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBytes))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create retry rerank request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+			req.Header.Set("api-key", apiKey)
+		}
+
+		resp, err = client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("retry rerank request failed: %w", err)
+		}
+	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -92,6 +133,8 @@ func Rerank(ctx context.Context, baseURL, apiKey, model, query string, texts []s
 		return nil, fmt.Errorf("empty response from rerank server")
 	}
 
+	log.Printf("[Rerank] Raw response: %s", trimmed)
+
 	var items []RerankItem
 
 	// 1. Try parsing as a raw array of floats/scores: [0.95, 0.82, ...]
@@ -100,6 +143,7 @@ func Rerank(ctx context.Context, baseURL, apiKey, model, query string, texts []s
 		for i, score := range floatScores {
 			items = append(items, RerankItem{Index: i, Score: score})
 		}
+		log.Printf("[Rerank] Parsed as float array, returned %d items", len(items))
 		return items, nil
 	}
 
@@ -132,6 +176,12 @@ func Rerank(ctx context.Context, baseURL, apiKey, model, query string, texts []s
 				score = *item.RelevanceScore
 			}
 			items = append(items, RerankItem{Index: idx, Score: score})
+		}
+		log.Printf("[Rerank] Parsed as array of objects, returned %d items", len(items))
+		for k, it := range items {
+			if k < 5 {
+				log.Printf("[Rerank]   item[%d]: Index=%d, Score=%f", k, it.Index, it.Score)
+			}
 		}
 		return items, nil
 	}
@@ -167,6 +217,12 @@ func Rerank(ctx context.Context, baseURL, apiKey, model, query string, texts []s
 				score = *item.RelevanceScore
 			}
 			items = append(items, RerankItem{Index: idx, Score: score})
+		}
+		log.Printf("[Rerank] Parsed as envelope results, returned %d items", len(items))
+		for k, it := range items {
+			if k < 5 {
+				log.Printf("[Rerank]   item[%d]: Index=%d, Score=%f", k, it.Index, it.Score)
+			}
 		}
 		return items, nil
 	}

@@ -68,6 +68,7 @@ type QdrantPoint struct {
 	Score         float32                `json:"score"`
 	Vector        []float32              `json:"vector,omitempty"`
 	OriginalScore float32                `json:"original_score,omitempty"`
+	IsPrimary     bool                   `json:"is_primary,omitempty"`
 }
 
 type QdrantQueryResponse struct {
@@ -222,12 +223,12 @@ func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vecto
 		return "", nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	// Truncate the candidate pool down to the user-requested return count.
-	// This is the critical step that decouples search scope (candidateLimit)
-	// from return count (docs). We may have asked Qdrant for thousands of
-	// candidates; we now keep only the top `docs` for the LLM context.
 	if docs > 0 && len(respBody.Result) > docs {
 		respBody.Result = respBody.Result[:docs]
+	}
+
+	for i := range respBody.Result {
+		respBody.Result[i].IsPrimary = true
 	}
 
 	var texts []string
@@ -408,6 +409,9 @@ func SearchQdrantFullCorpus(
 				if err != nil {
 					return "", nil, false, err
 				}
+				for i := range top {
+					top[i].IsPrimary = true
+				}
 				texts := extractTexts(top)
 				return strings.Join(texts, "\n---\n"), top, true, nil
 			}
@@ -444,6 +448,9 @@ func SearchQdrantFullCorpus(
 	})
 	if err != nil {
 		return "", nil, false, err
+	}
+	for i := range top {
+		top[i].IsPrimary = true
 	}
 	texts := extractTexts(top)
 	return strings.Join(texts, "\n---\n"), top, false, nil
@@ -1269,6 +1276,8 @@ func ApplyExpansionToPrimaries(
 			}
 			if mut, exists := mutatedMap[c.ID]; exists {
 				c = mut
+			} else {
+				c.IsPrimary = false
 			}
 			docChunks = append(docChunks, c)
 		}
@@ -1368,6 +1377,10 @@ func exactSearchWithPoints(
 	var respBody QdrantQueryResponse
 	if err := json.NewDecoder(resp.Body).Decode(&respBody); err != nil {
 		return "", nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	for i := range respBody.Result {
+		respBody.Result[i].IsPrimary = true
 	}
 
 	var texts []string

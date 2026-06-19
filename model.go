@@ -1290,9 +1290,10 @@ func formatReferences(points []rag.QdrantPoint, width int) string {
 			continue
 		}
 
-		// Compute the chunk range covered by this group and the top score.
+		// Compute the chunk range covered by this group and the top score from its primary chunks.
 		lo, hi := -1, -1
-		topScore := pts[0].Score
+		var topScore float32
+		hasPrimaryScore := false
 		for _, p := range pts {
 			idx := extractIdx(p)
 			if idx >= 0 {
@@ -1303,9 +1304,15 @@ func formatReferences(points []rag.QdrantPoint, width int) string {
 					hi = idx
 				}
 			}
-			if p.Score > topScore {
-				topScore = p.Score
+			if p.IsPrimary {
+				if !hasPrimaryScore || p.Score > topScore {
+					topScore = p.Score
+					hasPrimaryScore = true
+				}
 			}
+		}
+		if !hasPrimaryScore {
+			topScore = pts[0].Score
 		}
 		chunkRangeStr := ""
 		if lo >= 0 && hi >= 0 {
