@@ -22,6 +22,7 @@ type Config struct {
 	RerankerAPIKey    string `json:"reranker_api_key"`
 	RerankerModel     string `json:"reranker_model"`
 	SearchCap         int    `json:"search_cap,omitempty"`
+	RerankerPool      int    `json:"reranker_pool,omitempty"`
 }
 
 func getConfigPath() string {
@@ -82,6 +83,11 @@ func LoadConfig() (Config, error) {
 	if val := os.Getenv("SEARCH_CAP"); val != "" {
 		if n, err := strconv.Atoi(val); err == nil && n >= 0 {
 			cfg.SearchCap = n
+		}
+	}
+	if val := os.Getenv("RERANKER_POOL"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n >= 0 {
+			cfg.RerankerPool = n
 		}
 	}
 

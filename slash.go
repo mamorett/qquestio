@@ -236,6 +236,29 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				}
 			}
 
+		case "/rerankerpool":
+			if len(args) == 0 {
+				if m.rerankerPool <= 0 {
+					return slashResultMsg{feedback: "Reranker pool → auto (dynamically sized based on number of documents requested)"}
+				}
+				return slashResultMsg{feedback: fmt.Sprintf("Reranker pool → %d candidates", m.rerankerPool)}
+			}
+			arg := strings.ToLower(strings.TrimSpace(args[0]))
+			if arg == "auto" || arg == "off" || arg == "none" || arg == "0" {
+				m.rerankerPool = 0
+				return slashResultMsg{feedback: "Reranker pool → auto (dynamically sized based on number of documents requested)"}
+			}
+			n, err := strconv.Atoi(args[0])
+			if err != nil || n < 1 {
+				return appErrMsg{
+					err:    fmt.Errorf("/rerankerpool requires a positive integer, 'auto', or 'off'"),
+					reason: "Usage: /rerankerpool <N> | /rerankerpool auto (0 = auto)",
+					stage:  "slash",
+				}
+			}
+			m.rerankerPool = n
+			return slashResultMsg{feedback: fmt.Sprintf("Reranker pool → %d primary candidates", n)}
+
 		case "/system":
 			if len(args) == 0 {
 				return appErrMsg{
@@ -315,6 +338,7 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				"  /cache [status|refresh|warmup|clear|dir] - Inspect or control the on-disk corpus cache\n" +
 				"  /filter [key] <val> - Filter search (e.g. '/filter file_name guide.txt' or '/filter guide.txt')\n" +
 				"  /rerank <on|off>    - Enable/disable the reranker step\n" +
+				"  /rerankerpool <N|auto> - Set the candidate pool size for the reranker (0/auto = dynamic)\n" +
 				"  /mode <strict|hybrid>- Switch RAG mode (strict closed-book vs hybrid general-knowledge)\n" +
 				"  /system <prompt>    - Update the custom LLM system prompt\n" +
 				"  /copy               - Copy the last assistant response to the clipboard\n" +

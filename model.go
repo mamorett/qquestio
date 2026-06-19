@@ -47,6 +47,7 @@ type Model struct {
 	collection        string // Active Qdrant collection (init: cfg.DefaultCollection)
 	searchLimit       int    // Number of Qdrant results (default: 5)
 	searchCap         int    // Hard upper bound on candidate pool for Qdrant search (0 = no cap, search full corpus)
+	rerankerPool      int    // Primary candidate pool size for reranker (0 = auto)
 	searchExpand      int    // ±N adjacent chunks to expand each top match from the same document (0 = disabled, 1 = default)
 	searchMode        string // "auto" (default), "exact" (force server-side), or "local" (client-side brute-force using all CPU cores)
 	systemPrompt      string // Custom system prompt (default: built-in RAG prompt)
@@ -122,6 +123,7 @@ func NewModel(ctx context.Context, cfg Config) *Model {
 		collection:      cfg.DefaultCollection,
 		searchLimit:     10,
 		searchCap:       cfg.SearchCap,
+		rerankerPool:    cfg.RerankerPool,
 		searchExpand:    1, // ±1 adjacent chunk from the same document by default
 		searchMode:      "auto",
 		state:           stateIdle,

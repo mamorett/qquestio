@@ -101,6 +101,58 @@ func TestLoadConfig_JSONConfig(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_RerankerPool(t *testing.T) {
+	// 1. Env override test
+	os.Clearenv()
+	t.Setenv("QDRANT_URL", "http://localhost:6333")
+	t.Setenv("QDRANT_API_KEY", "test-key")
+	t.Setenv("EMBEDDING_URL", "http://localhost:8080")
+	t.Setenv("EMBEDDING_API_KEY", "test-embedding-key")
+	t.Setenv("EMBEDDING_MODEL", "nomic-embed")
+	t.Setenv("OPENAI_URL", "http://localhost:4000")
+	t.Setenv("OPENAI_API_KEY", "test-openai-key")
+	t.Setenv("OPENAI_MODEL", "llama3")
+	t.Setenv("DEFAULT_COLLECTION", "documents")
+	t.Setenv("RERANKER_POOL", "75")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.RerankerPool != 75 {
+		t.Errorf("expected RerankerPool 75, got %d", cfg.RerankerPool)
+	}
+
+	// 2. JSON config test
+	os.Clearenv()
+	jsonContent := `{
+		"qdrant_url": "http://localhost:6333",
+		"qdrant_api_key": "json-key",
+		"embedding_url": "http://localhost:8080",
+		"embedding_api_key": "json-api-key",
+		"embedding_model": "nomic-embed",
+		"openai_url": "http://localhost:4600",
+		"openai_api_key": "json-api-key",
+		"openai_model": "llama3-json",
+		"default_collection": "documents",
+		"reranker_pool": 150
+	}`
+
+	err = os.WriteFile("config.json", []byte(jsonContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write mock config.json file: %v", err)
+	}
+	defer os.Remove("config.json")
+
+	cfg, err = LoadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.RerankerPool != 150 {
+		t.Errorf("expected RerankerPool 150, got %d", cfg.RerankerPool)
+	}
+}
+
 // helper contains check
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || (s[0:len(substr)] == substr || stringsContains(s, substr)))

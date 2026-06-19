@@ -27,6 +27,48 @@ func (m *Model) generateEmbeddingCmd(query string) tea.Cmd {
 // with query-time context expansion.
 //
 // The active path is chosen automatically based on m.searchCap and m.searchMode:
+func (m *Model) computeSearchDocs(docs, expand int) int {
+	if expand < 0 {
+		expand = 0
+	}
+
+	// Compute the base candidate pool size before expansion scaling.
+	basePool := docs
+	if m.cfg.RerankerURL != "" && !m.disableReranker {
+		if m.rerankerPool > 0 {
+			basePool = m.rerankerPool
+		} else {
+			basePool = docs * 5
+			if basePool < 50 {
+				basePool = 50
+			}
+		}
+	}
+
+	searchDocs := basePool
+	if expand > 0 {
+		// Scale candidate pool by (expand + 1) to ensure a sufficiently wide
+		// candidate pool is pulled from the full corpus to account for
+		// similarity spanning adjacent chunks.
+		searchDocs = basePool * (expand + 1)
+
+		// Cap the scaled pool to prevent excessive resource usage, while
+		// honoring explicitly set large reranker pools.
+		capVal := 500
+		if m.rerankerPool > capVal {
+			capVal = m.rerankerPool
+		}
+		if searchDocs > capVal {
+			searchDocs = capVal
+		}
+	}
+
+	if searchDocs < docs {
+		searchDocs = docs
+	}
+	return searchDocs
+}
+
 //
 //   - Cap set (m.searchCap > 0): use Qdrant's HNSW query API with the cap as
 //     the candidate pool size. Fast, but bounded by the cap (approximate recall).
@@ -49,29 +91,7 @@ func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 	return func() tea.Msg {
 		docs := m.searchLimit
 		expand := m.searchExpand
-		if expand < 0 {
-			expand = 0
-		}
-
-		// Compute the size of the primary candidate pool. With reranker enabled
-		// we use a fixed 50. Without reranker, we ALSO scale the pool by expand
-		// so the vector similarity computation "considers many more chunks" as
-		// the user explicitly requested (the expand>0 path must widen recall).
-		searchDocs := docs
-		if m.cfg.RerankerURL != "" && !m.disableReranker {
-			searchDocs = 50
-		} else if expand >= 2 {
-			// Bug 1 fix: scale the primary candidate pool with expand.
-			// limit=10, expand=10 → searchDocs=100; limit=10, expand=20 → 200.
-			// Capped at 500 to avoid blowing up the LLM context window.
-			searchDocs = docs * expand
-			if searchDocs > 500 {
-				searchDocs = 500
-			}
-		}
-		if searchDocs < docs {
-			searchDocs = docs
-		}
+		searchDocs := m.computeSearchDocs(docs, expand)
 
 		// HNSW path: user explicitly opted into a cap (approximate, bounded).
 		// We bypass context expansion here because HNSW results are
