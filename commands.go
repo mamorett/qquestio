@@ -338,6 +338,7 @@ func (m *Model) rerankPointsCmd(result searchResultMsg) tea.Cmd {
 			if !ok {
 				score = -999.0
 			}
+			pt.OriginalScore = pt.Score
 			pt.Score = float32(score)
 			scoredPoints = append(scoredPoints, scoredPoint{point: pt, score: score})
 		}

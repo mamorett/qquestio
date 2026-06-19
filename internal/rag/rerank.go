@@ -25,9 +25,10 @@ type RerankRequest struct {
 
 // GenericRerankItem represents a returned item with index and score.
 type GenericRerankItem struct {
-	Index          *int     `json:"index"`
-	Score          *float64 `json:"score"`
-	RelevanceScore *float64 `json:"relevance_score"`
+	Index          interface{} `json:"index"`
+	Score          *float64    `json:"score"`
+	RelevanceScore *float64    `json:"relevance_score"`
+	Document       interface{} `json:"document"`
 }
 
 // Rerank queries a generic, model-agnostic reranker endpoint and returns relevance scores.
@@ -106,10 +107,24 @@ func Rerank(ctx context.Context, baseURL, apiKey, model, query string, texts []s
 	var objectScores []GenericRerankItem
 	if err := json.Unmarshal(bodyBytes, &objectScores); err == nil {
 		for i, item := range objectScores {
-			idx := i
-			if item.Index != nil {
-				idx = *item.Index
+			idx := -1
+			if val, ok := parseIndex(item.Index); ok {
+				idx = val
+			} else {
+				docText := extractRerankText(item.Document)
+				if docText != "" {
+					for ti, txt := range texts {
+						if strings.TrimSpace(txt) == strings.TrimSpace(docText) {
+							idx = ti
+							break
+						}
+					}
+				}
 			}
+			if idx < 0 {
+				idx = i
+			}
+
 			score := 0.0
 			if item.Score != nil {
 				score = *item.Score
@@ -127,10 +142,24 @@ func Rerank(ctx context.Context, baseURL, apiKey, model, query string, texts []s
 	}
 	if err := json.Unmarshal(bodyBytes, &envelope); err == nil && len(envelope.Results) > 0 {
 		for i, item := range envelope.Results {
-			idx := i
-			if item.Index != nil {
-				idx = *item.Index
+			idx := -1
+			if val, ok := parseIndex(item.Index); ok {
+				idx = val
+			} else {
+				docText := extractRerankText(item.Document)
+				if docText != "" {
+					for ti, txt := range texts {
+						if strings.TrimSpace(txt) == strings.TrimSpace(docText) {
+							idx = ti
+							break
+						}
+					}
+				}
 			}
+			if idx < 0 {
+				idx = i
+			}
+
 			score := 0.0
 			if item.Score != nil {
 				score = *item.Score
@@ -143,4 +172,43 @@ func Rerank(ctx context.Context, baseURL, apiKey, model, query string, texts []s
 	}
 
 	return nil, fmt.Errorf("could not parse rerank response format: %s", trimmed)
+}
+
+func parseIndex(val interface{}) (int, bool) {
+	if val == nil {
+		return 0, false
+	}
+	switch n := val.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case string:
+		var i int
+		if _, err := fmt.Sscanf(n, "%d", &i); err == nil {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+func extractRerankText(doc interface{}) string {
+	if doc == nil {
+		return ""
+	}
+	if s, ok := doc.(string); ok {
+		return s
+	}
+	if m, ok := doc.(map[string]interface{}); ok {
+		for _, key := range []string{"text", "content", "document"} {
+			if v, ok := m[key]; ok {
+				if s, ok := v.(string); ok {
+					return s
+				}
+			}
+		}
+	}
+	return ""
 }

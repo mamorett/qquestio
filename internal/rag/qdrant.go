@@ -63,10 +63,11 @@ type QdrantSearchRequest struct {
 }
 
 type QdrantPoint struct {
-	ID      interface{}            `json:"id"`
-	Payload map[string]interface{} `json:"payload"`
-	Score   float32                `json:"score"`
-	Vector  []float32              `json:"vector,omitempty"`
+	ID            interface{}            `json:"id"`
+	Payload       map[string]interface{} `json:"payload"`
+	Score         float32                `json:"score"`
+	Vector        []float32              `json:"vector,omitempty"`
+	OriginalScore float32                `json:"original_score,omitempty"`
 }
 
 type QdrantQueryResponse struct {
@@ -1175,6 +1176,12 @@ func ApplyExpansionToPrimaries(
 	if len(primaries) == 0 {
 		return "", nil
 	}
+
+	mutatedMap := make(map[interface{}]QdrantPoint)
+	for _, pt := range primaries {
+		mutatedMap[pt.ID] = pt
+	}
+
 	if expand == 0 || len(em) == 0 {
 		// No expansion: just emit the primaries.
 		var sb strings.Builder
@@ -1259,6 +1266,9 @@ func ApplyExpansionToPrimaries(
 			c, ok := docIdxMap[i]
 			if !ok {
 				continue
+			}
+			if mut, exists := mutatedMap[c.ID]; exists {
+				c = mut
 			}
 			docChunks = append(docChunks, c)
 		}

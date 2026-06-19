@@ -168,6 +168,40 @@ func TestRerank(t *testing.T) {
 	if len(items3) != 2 || items3[0].Index != 0 || items3[0].Score != 0.98 || items3[1].Index != 1 || items3[1].Score != 0.85 {
 		t.Errorf("unexpected results for envelope object: %v", items3)
 	}
+
+	// Test Format 4: String/float index
+	server4 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"results": [{"index": "0.0", "score": 0.95}, {"index": 1.0, "score": 0.80}]}`)
+	}))
+	defer server4.Close()
+
+	items4, err := Rerank(context.Background(), server4.URL, "apiKey", "model", "query", []string{"doc1", "doc2"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(items4) != 2 || items4[0].Index != 0 || items4[0].Score != 0.95 || items4[1].Index != 1 || items4[1].Score != 0.80 {
+		t.Errorf("unexpected results for float/string indices: %v", items4)
+	}
+
+	// Test Format 5: Missing index but document text is returned (text fallback)
+	server5 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, `{"results": [{"document": {"text": "doc2"}, "score": 0.90}, {"document": "doc1", "score": 0.70}]}`)
+	}))
+	defer server5.Close()
+
+	items5, err := Rerank(context.Background(), server5.URL, "apiKey", "model", "query", []string{"doc1", "doc2"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Note: since document "doc2" was returned first, it should match input doc2 (index 1)
+	// and document "doc1" was returned second, it should match input doc1 (index 0)
+	if len(items5) != 2 || items5[0].Index != 1 || items5[0].Score != 0.90 || items5[1].Index != 0 || items5[1].Score != 0.70 {
+		t.Errorf("unexpected results for document text fallback matching: %v", items5)
+	}
 }
 
 func TestQdrantPoint_ExtractText(t *testing.T) {

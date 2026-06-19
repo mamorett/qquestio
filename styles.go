@@ -43,6 +43,10 @@ type Styles struct {
 	InputText     lipgloss.Style // fg: nord6
 	ErrorText     lipgloss.Style // fg: nord11, italic
 	CollectionTag lipgloss.Style // fg: nord15, bg: nord2, padding 0 1
+	MainViewportFocused   lipgloss.Style // focused main viewport border
+	MainViewportUnfocused lipgloss.Style // unfocused main viewport border
+	RefViewportFocused    lipgloss.Style // focused references viewport border
+	RefViewportUnfocused  lipgloss.Style // unfocused references viewport border
 	SpinnerStyle  lipgloss.Style // fg: nord8
 }
 
@@ -72,7 +76,28 @@ func DefaultStyles() Styles {
 			Foreground(nord15).
 			Background(nord2).
 			Padding(0, 1),
+		MainViewportFocused: lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(nord8).
+			Background(nord0).
+			Foreground(nord4),
+		MainViewportUnfocused: lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(nord3).
+			Background(nord0).
+			Foreground(nord4),
+		RefViewportFocused: lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(nord8).
+			Background(nord0).
+			Foreground(nord4),
+		RefViewportUnfocused: lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(nord3).
+			Background(nord0).
+			Foreground(nord4),
 		SpinnerStyle: lipgloss.NewStyle().
 			Foreground(nord8),
 	}
 }
+
