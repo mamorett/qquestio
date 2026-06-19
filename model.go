@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -30,18 +33,21 @@ const (
 )
 
 type ConversationTurn struct {
-	Role                    string            // "user" | "assistant" | "system"
-	Content                 string            // The text content
-	References              []rag.QdrantPoint // Retrieved context points (only for assistant responses)
-	RenderedContent         string            // Cached rendered markdown
-	RenderedWidth           int               // The width at which it was rendered
-	RenderedReferences      string            // Cached rendered references block
-	RenderedReferencesWidth int               // The width at which references were rendered
+	Role                    string            `json:"role"`                      // "user" | "assistant" | "system"
+	Content                 string            `json:"content"`                   // The text content
+	References              []rag.QdrantPoint `json:"references,omitempty"`      // Retrieved context points (only for assistant responses)
+	RenderedContent         string            `json:"rendered_content,omitempty"` // Cached rendered markdown
+	RenderedWidth           int               `json:"rendered_width,omitempty"`   // The width at which it was rendered
+	RenderedReferences      string            `json:"rendered_references,omitempty"` // Cached rendered references block
+	RenderedReferencesWidth int               `json:"rendered_references_width,omitempty"` // The width at which references were rendered
 }
 
 type Model struct {
 	// --- Config (immutable) ---
-	cfg Config
+	cfg            Config
+	sessionID      string // Unique identifier for the active session (timestamp-based)
+	loadingMessage string // Random loading phrase selected per query
+	leakState      int    // State machine tracker to filter out leaked terminal SGR mouse sequences
 
 	// --- Runtime state (mutable via slash commands) ---
 	collection        string // Active Qdrant collection (init: cfg.DefaultCollection)
@@ -62,10 +68,12 @@ type Model struct {
 	state appState
 
 	// --- UI components ---
-	textInput textinput.Model
-	viewport  viewport.Model
-	spinner   spinner.Model
-	statusMsg string // Displayed in header bar
+	textInput   textinput.Model
+	viewport    viewport.Model
+	refViewport viewport.Model
+	focusRef    bool // True if focused on the references panel
+	spinner     spinner.Model
+	statusMsg   string // Displayed in header bar
 
 	// --- Conversation ---
 	history       []ConversationTurn // Full conversation history including system info
@@ -118,8 +126,15 @@ func NewModel(ctx context.Context, cfg Config) *Model {
 	vp := viewport.New(0, 0)
 	vp.Style = lipgloss.NewStyle().Background(nord0).Foreground(nord4)
 
+	refVp := viewport.New(0, 0)
+	refVp.Style = lipgloss.NewStyle().Background(nord0).Foreground(nord4)
+
+	sessionID := time.Now().Format("20060102-150405")
+
 	return &Model{
 		cfg:             cfg,
+		sessionID:       sessionID,
+		loadingMessage:  "Thinking...",
 		collection:      cfg.DefaultCollection,
 		searchLimit:     10,
 		searchCap:       cfg.SearchCap,
@@ -129,6 +144,8 @@ func NewModel(ctx context.Context, cfg Config) *Model {
 		state:           stateIdle,
 		textInput:       ti,
 		viewport:        vp,
+		refViewport:     refVp,
+		focusRef:        false,
 		spinner:         s,
 		statusMsg:       "Ready",
 		skills:          NewSkillRegistry(),
@@ -150,6 +167,34 @@ func (m *Model) Init() tea.Cmd {
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Filter out leaked SGR mouse sequences from terminal input parsing buffer issues
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.Type == tea.KeyEscape {
+			m.leakState = 1
+		} else if m.leakState == 1 && len(keyMsg.Runes) > 0 && keyMsg.Runes[0] == '[' {
+			m.leakState = 2
+			return m, nil
+		} else if m.leakState == 2 && len(keyMsg.Runes) > 0 && keyMsg.Runes[0] == '<' {
+			m.leakState = 3
+			return m, nil
+		} else if m.leakState == 3 {
+			if len(keyMsg.Runes) > 0 {
+				r := keyMsg.Runes[0]
+				if (r >= '0' && r <= '9') || r == ';' || r == 'M' || r == 'm' {
+					if r == 'M' || r == 'm' {
+						m.leakState = 0
+					}
+					return m, nil
+				}
+			}
+			m.leakState = 0
+		} else {
+			m.leakState = 0
+		}
+	} else if _, isMouse := msg.(tea.MouseMsg); isMouse {
+		m.leakState = 0
+	}
+
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
@@ -200,14 +245,33 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				mode = "Rendered Markdown"
 			}
 			m.statusMsg = fmt.Sprintf("View mode → %s", mode)
+		case tea.KeyTab:
+			m.focusRef = !m.focusRef
+			m.updateViewport()
 		case tea.KeyCtrlUp:
-			m.viewport.LineUp(1)
+			if m.focusRef {
+				m.refViewport.LineUp(1)
+			} else {
+				m.viewport.LineUp(1)
+			}
 		case tea.KeyCtrlDown:
-			m.viewport.LineDown(1)
+			if m.focusRef {
+				m.refViewport.LineDown(1)
+			} else {
+				m.viewport.LineDown(1)
+			}
 		case tea.KeyPgUp:
-			m.viewport.HalfPageUp()
+			if m.focusRef {
+				m.refViewport.HalfPageUp()
+			} else {
+				m.viewport.HalfPageUp()
+			}
 		case tea.KeyPgDown:
-			m.viewport.HalfPageDown()
+			if m.focusRef {
+				m.refViewport.HalfPageDown()
+			} else {
+				m.viewport.HalfPageDown()
+			}
 		case tea.KeyUp:
 			if len(m.inputHistory) > 0 {
 				if m.historyIndex == len(m.inputHistory) {
@@ -254,6 +318,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Start RAG pipeline
 				m.lastQuery = raw
 				m.output = ""
+				m.lastPoints = nil
+				m.ragContext = ""
+				m.selectRandomLoadingMessage()
 				m.state = stateEmbedding
 				m.statusMsg = "Generating embedding..."
 				m.updateViewport()
@@ -268,6 +335,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.searchQdrantCmd(msg.vector))
 
 	case searchResultMsg:
+		m.refViewport.GotoTop()
 		if m.cfg.RerankerURL != "" && !m.disableReranker {
 			m.state = stateReranking
 			m.statusMsg = "Reranking retrieved documents..."
@@ -283,6 +351,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case rerankResultMsg:
+		m.refViewport.GotoTop()
 		m.ragContext = msg.context
 		m.lastPoints = msg.points
 		m.state = stateStreaming
@@ -354,6 +423,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.state = stateError
 		m.statusMsg = fmt.Sprintf("Error [%s]: %s (%v)", msg.stage, msg.reason, msg.err)
+		if msg.stage == "slash" {
+			m.history = append(m.history, ConversationTurn{
+				Role:    "system",
+				Content: fmt.Sprintf("Command Error: %s", msg.reason),
+			})
+		}
+		m.updateViewport()
 		if m.streamReader != nil {
 			_ = m.streamReader.Close()
 			m.streamReader = nil
@@ -379,6 +455,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case slashResultMsg:
 		m.statusMsg = msg.feedback
+		m.history = append(m.history, ConversationTurn{
+			Role:    "system",
+			Content: fmt.Sprintf("Command executed: %s", msg.feedback),
+		})
+		m.updateViewport()
 		cmds = append(cmds, m.fetchQdrantInfoCmd())
 
 	case quitMsg:
@@ -415,6 +496,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateViewport()
 		cmds = append(cmds, m.warmupCacheCmd())
 
+	case tea.MouseMsg:
+		headerH := 4
+		if m.cfg.RerankerURL != "" {
+			headerH = 5
+		}
+		footerH := 3
+		if msg.Y >= headerH && msg.Y < m.height-footerH {
+			refWidth := m.width / 3
+			if refWidth < 20 {
+				refWidth = 20
+			}
+			if refWidth > m.width/2 {
+				refWidth = m.width/2
+			}
+			mainWidth := m.width - refWidth
+
+			if msg.X < mainWidth {
+				m.focusRef = false
+			} else {
+				m.focusRef = true
+			}
+			m.updateViewport()
+		}
+
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		headerH := 4
@@ -422,9 +527,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			headerH = 5
 		}
 		footerH := 3
-		m.viewport.Width = m.width
-		m.viewport.Height = m.height - headerH - footerH
+
+		refWidth := m.width / 3
+		if refWidth < 20 {
+			refWidth = 20
+		}
+		if refWidth > m.width/2 {
+			refWidth = m.width/2
+		}
+		mainWidth := m.width - refWidth
+
+		bodyHeight := m.height - headerH - footerH
+		viewportHeight := bodyHeight - 2
+		if viewportHeight < 1 {
+			viewportHeight = 1
+		}
+
+		m.viewport.Width = mainWidth - 2
+		m.viewport.Height = viewportHeight
+
+		m.refViewport.Width = refWidth - 2
+		m.refViewport.Height = viewportHeight
+
 		m.textInput.Width = m.width - 4
+		m.updateViewport()
 	}
 
 	// --- Sub-model updates (always, for cursor blink + spinner) ---
@@ -446,7 +572,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if shouldForward {
 			var vpCmd tea.Cmd
-			m.viewport, vpCmd = m.viewport.Update(msg)
+			if m.focusRef {
+				m.refViewport, vpCmd = m.refViewport.Update(msg)
+			} else {
+				m.viewport, vpCmd = m.viewport.Update(msg)
+			}
 			cmds = append(cmds, vpCmd)
 		}
 	}
@@ -456,7 +586,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) View() string {
 	header := m.renderHeader()
-	body := m.viewport.View()
+
+	styles := DefaultStyles()
+	var mainView string
+	var refView string
+
+	if m.focusRef {
+		mainView = styles.MainViewportUnfocused.Render(m.viewport.View())
+		refView = styles.RefViewportFocused.Render(m.refViewport.View())
+	} else {
+		mainView = styles.MainViewportFocused.Render(m.viewport.View())
+		refView = styles.RefViewportUnfocused.Render(m.refViewport.View())
+	}
+
+	body := lipgloss.JoinHorizontal(lipgloss.Top, mainView, refView)
 	footer := m.renderFooter()
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
@@ -646,7 +789,7 @@ func (m *Model) getRenderedTurn(turn *ConversationTurn) string {
 	if turn.Role != "assistant" {
 		return turn.Content
 	}
-	targetWidth := m.width - 4
+	targetWidth := m.viewport.Width
 	if targetWidth < 20 {
 		targetWidth = 20
 	}
@@ -662,7 +805,7 @@ func (m *Model) getRenderedReferences(turn *ConversationTurn) string {
 	if len(turn.References) == 0 {
 		return ""
 	}
-	targetWidth := m.width - 4
+	targetWidth := m.refViewport.Width
 	if targetWidth < 20 {
 		targetWidth = 20
 	}
@@ -671,6 +814,37 @@ func (m *Model) getRenderedReferences(turn *ConversationTurn) string {
 		turn.RenderedReferencesWidth = targetWidth
 	}
 	return turn.RenderedReferences
+}
+
+// getActiveReferences retrieves the active references to be displayed in the right panel.
+func (m *Model) getActiveReferences() []rag.QdrantPoint {
+	if m.state == stateEmbedding || m.state == stateSearching || m.state == stateReranking || m.state == stateStreaming {
+		return m.lastPoints
+	}
+	for i := len(m.history) - 1; i >= 0; i-- {
+		if m.history[i].Role == "assistant" && len(m.history[i].References) > 0 {
+			return m.history[i].References
+		}
+	}
+	return nil
+}
+
+// updateRefViewport constructs and renders the references in the right viewport.
+func (m *Model) updateRefViewport() {
+	if m.state == stateEmbedding || m.state == stateSearching || m.state == stateReranking {
+		m.refViewport.SetContent("\n  Retrieving references...")
+		return
+	}
+
+	refs := m.getActiveReferences()
+	if len(refs) == 0 {
+		m.refViewport.SetContent("\n  No references loaded.\n  Run a query to retrieve context.")
+		return
+	}
+	
+	// Format references wrapping them to the viewport's width.
+	rendered := formatReferences(refs, m.refViewport.Width)
+	m.refViewport.SetContent(rendered)
 }
 
 // updateViewport constructs and renders the conversation history in the viewport.
@@ -688,14 +862,19 @@ func (m *Model) updateViewport() {
 			} else {
 				sb.WriteString(m.getRenderedTurn(turn) + "\n\n")
 			}
-			if len(turn.References) > 0 {
-				sb.WriteString(m.getRenderedReferences(turn) + "\n\n")
-			}
 			// Add a horizontal rule separating turns
-			sb.WriteString(lipgloss.NewStyle().Foreground(nord3).Render(strings.Repeat("─", m.width-4)) + "\n\n")
+			dividerWidth := m.viewport.Width
+			if dividerWidth < 10 {
+				dividerWidth = 10
+			}
+			sb.WriteString(lipgloss.NewStyle().Foreground(nord3).Render(strings.Repeat("─", dividerWidth)) + "\n\n")
 		} else if turn.Role == "system" {
 			sb.WriteString(lipgloss.NewStyle().Foreground(nord13).Italic(true).Render("ℹ "+turn.Content) + "\n\n")
-			sb.WriteString(lipgloss.NewStyle().Foreground(nord3).Render(strings.Repeat("─", m.width-4)) + "\n\n")
+			dividerWidth := m.viewport.Width
+			if dividerWidth < 10 {
+				dividerWidth = 10
+			}
+			sb.WriteString(lipgloss.NewStyle().Foreground(nord3).Render(strings.Repeat("─", dividerWidth)) + "\n\n")
 		}
 	}
 
@@ -729,9 +908,9 @@ func (m *Model) updateViewport() {
 			if m.showRawSource {
 				streamingText = cleanLLMOutput(m.output)
 			} else {
-				streamingText = renderMarkdown(cleanLLMOutput(m.output), m.width-4)
+				streamingText = renderMarkdown(cleanLLMOutput(m.output), m.viewport.Width)
 			}
-			sb.WriteString(streamingText + "\n\n" + m.spinner.View() + lipgloss.NewStyle().Foreground(nord13).Render(" Cooking response from OpenAI...") + "\n")
+			sb.WriteString(streamingText + "\n\n" + m.spinner.View() + lipgloss.NewStyle().Foreground(nord13).Render(" "+m.loadingMessage) + "\n")
 		} else {
 			var cb strings.Builder
 			cb.WriteString(lipgloss.NewStyle().Foreground(nord14).Render("  ✔ Generated embedding vector") + "\n")
@@ -741,7 +920,7 @@ func (m *Model) updateViewport() {
 			} else {
 				cb.WriteString(lipgloss.NewStyle().Foreground(nord14).Render(fmt.Sprintf("  ✔ Retrieved %d context documents from Qdrant", len(m.lastPoints))) + "\n")
 			}
-			cb.WriteString(lipgloss.NewStyle().Foreground(nord13).Render(fmt.Sprintf("  %s Cooking response from OpenAI...", m.spinner.View())) + "\n")
+			cb.WriteString(lipgloss.NewStyle().Foreground(nord13).Render(fmt.Sprintf("  %s %s", m.spinner.View(), m.loadingMessage)) + "\n")
 			sb.WriteString(cb.String() + "\n")
 		}
 	}
@@ -751,6 +930,9 @@ func (m *Model) updateViewport() {
 	if wasAtBottom || (m.state == stateStreaming && len(m.output) < 20) {
 		m.viewport.GotoBottom()
 	}
+
+	// Always sync references panel
+	m.updateRefViewport()
 }
 
 // cleanLLMOutput strips unwanted LLM template wrapper tokens from the output display.
@@ -805,8 +987,24 @@ func cleanLLMOutput(text string) string {
 	return strings.TrimSpace(cleaned)
 }
 
-// copyLastResponseCmd finds and copies the last assistant response to system clipboard.
+// copyLastResponseCmd finds and copies the last assistant response (or references, depending on focus) to system clipboard.
 func (m *Model) copyLastResponseCmd() tea.Cmd {
+	if m.focusRef {
+		refs := m.getActiveReferences()
+		if len(refs) == 0 {
+			return func() tea.Msg {
+				return slashResultMsg{feedback: "No references to copy yet"}
+			}
+		}
+		refText := formatReferences(refs, 80)
+		return func() tea.Msg {
+			if err := clipboard.WriteAll(refText); err != nil {
+				return appErrMsg{err: err, reason: "Failed to copy references to clipboard", stage: "slash"}
+			}
+			return slashResultMsg{feedback: "Copied references to clipboard"}
+		}
+	}
+
 	var lastResponse string
 	for i := len(m.history) - 1; i >= 0; i-- {
 		if m.history[i].Role == "assistant" {
@@ -967,6 +1165,9 @@ func formatReferences(points []rag.QdrantPoint, width int) string {
 	if len(points) == 0 {
 		return ""
 	}
+	if width < 20 {
+		width = 20
+	}
 
 	// Group points by document identifier. We delegate to the same recursive
 	// extractDocumentName helper that buildPromptMessages uses, so the
@@ -1089,9 +1290,10 @@ func formatReferences(points []rag.QdrantPoint, width int) string {
 			continue
 		}
 
-		// Compute the chunk range covered by this group and the top score.
+		// Compute the chunk range covered by this group and the top score from its primary chunks.
 		lo, hi := -1, -1
 		var topScore float32
+		hasPrimaryScore := false
 		for _, p := range pts {
 			idx := extractIdx(p)
 			if idx >= 0 {
@@ -1102,9 +1304,15 @@ func formatReferences(points []rag.QdrantPoint, width int) string {
 					hi = idx
 				}
 			}
-			if p.Score > topScore {
-				topScore = p.Score
+			if p.IsPrimary {
+				if !hasPrimaryScore || p.Score > topScore {
+					topScore = p.Score
+					hasPrimaryScore = true
+				}
 			}
+		}
+		if !hasPrimaryScore {
+			topScore = pts[0].Score
 		}
 		chunkRangeStr := ""
 		if lo >= 0 && hi >= 0 {
@@ -1117,21 +1325,57 @@ func formatReferences(points []rag.QdrantPoint, width int) string {
 			chunkRangeStr = fmt.Sprintf("%d chunks", len(pts))
 		}
 
-		sb.WriteString(fmt.Sprintf("  %s %s %s %s (Score: %s)\n",
+		// First line: Document name. We wrap it completely to fit in width-16.
+		// Indent any wrapped lines by 5 spaces.
+		wrapWidth := width - 16
+		if wrapWidth < 12 {
+			wrapWidth = 12
+		}
+		docStyle := lipgloss.NewStyle().Width(wrapWidth)
+		wrappedDoc := docStyle.Render(docName)
+		docLines := strings.Split(wrappedDoc, "\n")
+		var docDisplay strings.Builder
+		for idx, line := range docLines {
+			if idx == 0 {
+				docDisplay.WriteString(line)
+			} else {
+				docDisplay.WriteString("\n     " + line)
+			}
+		}
+
+		// Second line: Range and score.
+		// e.g. "Score: 0.8500 · chunks 262-262"
+		scoreStr := fmt.Sprintf("%.4f", topScore)
+		var metaDisplay string
+		if width >= 40 {
+			metaDisplay = fmt.Sprintf("     Score: %s · %s", scoreStyle.Render(scoreStr), chunkStyle.Render(chunkRangeStr))
+		} else if width >= 30 {
+			metaDisplay = fmt.Sprintf("     S: %s · %s", scoreStyle.Render(scoreStr), chunkStyle.Render(chunkRangeStr))
+		} else {
+			metaDisplay = fmt.Sprintf("     %s · %s", scoreStyle.Render(scoreStr), chunkStyle.Render(chunkRangeStr))
+		}
+
+		sb.WriteString(fmt.Sprintf("  %s %s\n%s\n",
 			borderStyle.Render("──"),
-			metaStyle.Render(fmt.Sprintf("Document: %s", docName)),
-			chunkStyle.Render("·"),
-			chunkStyle.Render(chunkRangeStr),
-			scoreStyle.Render(fmt.Sprintf("%.4f", topScore)),
+			metaStyle.Render("Document: "+docDisplay.String()),
+			metaDisplay,
 		))
 
 		for _, p := range pts {
 			idx := extractIdx(p)
 			idxTag := ""
 			if idx >= 0 {
-				idxTag = fmt.Sprintf(" (chunk %d, score %.4f)", idx, p.Score)
+				if p.OriginalScore != 0 {
+					idxTag = fmt.Sprintf(" (chunk %d, score %.4f, db cosine %.4f)", idx, p.Score, p.OriginalScore)
+				} else {
+					idxTag = fmt.Sprintf(" (chunk %d, score %.4f)", idx, p.Score)
+				}
 			} else {
-				idxTag = fmt.Sprintf(" (score %.4f)", p.Score)
+				if p.OriginalScore != 0 {
+					idxTag = fmt.Sprintf(" (score %.4f, db cosine %.4f)", p.Score, p.OriginalScore)
+				} else {
+					idxTag = fmt.Sprintf(" (score %.4f)", p.Score)
+				}
 			}
 			sb.WriteString(metaStyle.Render("    • chunk") + idxTag + "\n")
 			emitChunkText(p.ExtractText())
@@ -1213,6 +1457,22 @@ func extractDocumentName(payload map[string]interface{}) string {
 	return hashCandidate
 }
 
+// truncateMiddle truncates a string in the middle to fit within maxLen.
+// It is particularly useful for keeping the prefix and suffix (like a file extension) intact.
+func truncateMiddle(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	if maxLen < 10 {
+		if maxLen > 3 {
+			return s[:maxLen-3] + "..."
+		}
+		return s[:maxLen]
+	}
+	half := (maxLen - 3) / 2
+	return s[:half] + "..." + s[len(s)-half:]
+}
+
 // isHexHash returns true if a string is a standard MD5, SHA-1, or SHA-256 hex hash.
 func isHexHash(s string) bool {
 	s = strings.TrimSpace(s)
@@ -1270,3 +1530,170 @@ func renderMarkdown(text string, width int) string {
 	}
 	return strings.TrimSpace(out)
 }
+
+type Session struct {
+	ID           string             `json:"id"`
+	Collection   string             `json:"collection,omitempty"`
+	SearchLimit  int                `json:"search_limit,omitempty"`
+	SearchCap    int                `json:"search_cap,omitempty"`
+	RerankerPool int                `json:"reranker_pool,omitempty"`
+	SearchExpand int                `json:"search_expand,omitempty"`
+	SearchMode   string             `json:"search_mode,omitempty"`
+	SystemPrompt string             `json:"system_prompt,omitempty"`
+	RAGMode      string             `json:"rag_mode,omitempty"`
+	FilterKey    string             `json:"filter_key,omitempty"`
+	FilterValue  string             `json:"filter_value,omitempty"`
+	History      []ConversationTurn `json:"history"`
+}
+
+func GetSessionsDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, "config", "qquestio", "sessions")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+func GetLastSessionID() (string, error) {
+	dir, err := GetSessionsDir()
+	if err != nil {
+		return "", err
+	}
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+	var sessionFiles []string
+	for _, f := range files {
+		if !f.IsDir() && strings.HasSuffix(f.Name(), ".json") {
+			sessionFiles = append(sessionFiles, strings.TrimSuffix(f.Name(), ".json"))
+		}
+	}
+	if len(sessionFiles) == 0 {
+		return "", fmt.Errorf("no sessions found")
+	}
+	sort.Strings(sessionFiles)
+	return sessionFiles[len(sessionFiles)-1], nil
+}
+
+func (m *Model) hasUserPrompt() bool {
+	for _, turn := range m.history {
+		if turn.Role == "user" {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) saveSession() error {
+	if !m.hasUserPrompt() {
+		return nil
+	}
+	dir, err := GetSessionsDir()
+	if err != nil {
+		return err
+	}
+	filePath := filepath.Join(dir, m.sessionID+".json")
+
+	sess := Session{
+		ID:           m.sessionID,
+		Collection:   m.collection,
+		SearchLimit:  m.searchLimit,
+		SearchCap:    m.searchCap,
+		RerankerPool: m.rerankerPool,
+		SearchExpand: m.searchExpand,
+		SearchMode:   m.searchMode,
+		SystemPrompt: m.systemPrompt,
+		RAGMode:      m.ragMode,
+		FilterKey:    m.filterKey,
+		FilterValue:  m.filterValue,
+		History:      m.history,
+	}
+
+	data, err := json.MarshalIndent(sess, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(filePath, data, 0644)
+}
+
+func (m *Model) loadSession(sessionID string) error {
+	dir, err := GetSessionsDir()
+	if err != nil {
+		return err
+	}
+	filePath := filepath.Join(dir, sessionID+".json")
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return err
+	}
+
+	var sess Session
+	if err := json.Unmarshal(data, &sess); err != nil {
+		return err
+	}
+
+	m.sessionID = sess.ID
+	if sess.Collection != "" {
+		m.collection = sess.Collection
+	}
+	if sess.SearchLimit > 0 {
+		m.searchLimit = sess.SearchLimit
+	}
+	m.searchCap = sess.SearchCap
+	m.rerankerPool = sess.RerankerPool
+	m.searchExpand = sess.SearchExpand
+	if sess.SearchMode != "" {
+		m.searchMode = sess.SearchMode
+	}
+	if sess.SystemPrompt != "" {
+		m.systemPrompt = sess.SystemPrompt
+	}
+	if sess.RAGMode != "" {
+		m.ragMode = sess.RAGMode
+	}
+	m.filterKey = sess.FilterKey
+	m.filterValue = sess.FilterValue
+	m.history = sess.History
+
+	// Rebuild input history from user turns
+	m.inputHistory = nil
+	for _, turn := range m.history {
+		if turn.Role == "user" {
+			m.inputHistory = append(m.inputHistory, turn.Content)
+		}
+	}
+	m.historyIndex = len(m.inputHistory)
+
+	// Force refresh viewport content and scroll to bottom
+	m.updateViewport()
+	m.viewport.GotoBottom()
+	return nil
+}
+
+func (m *Model) selectRandomLoadingMessage() {
+	sentences := []string{
+		"Consulting the oracle...",
+		"Distilling semantic essence...",
+		"Pondering the query...",
+		"Synthesizing knowledge...",
+		"Weaving words together...",
+		"Querying the matrix...",
+		"Extracting insights...",
+		"Formulating explanation...",
+		"Decoding latent space...",
+		"Assembling response pieces...",
+		"Tuning hyperparameters...",
+		"Mining vector indexes...",
+		"Aggregating context fragments...",
+	}
+	m.loadingMessage = sentences[time.Now().UnixNano()%int64(len(sentences))]
+}
+
+

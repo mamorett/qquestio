@@ -36,5 +36,5 @@ go.work.sum
 /qquestio
 /debug.log
 /config.json
-
-
+_reference
+graphify-out

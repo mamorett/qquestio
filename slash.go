@@ -274,6 +274,46 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 			if len(args) > 0 && args[0] == "all" {
 				return m.copyAllConversationCmd()()
 			}
+			if len(args) > 0 && (args[0] == "ref" || args[0] == "refs") {
+				refs := m.getActiveReferences()
+				if len(refs) == 0 {
+					return appErrMsg{
+						err:    fmt.Errorf("no references to copy"),
+						reason: "No references in history to copy",
+						stage:  "slash",
+					}
+				}
+				refText := formatReferences(refs, 80)
+				if err := clipboard.WriteAll(refText); err != nil {
+					return appErrMsg{
+						err:    err,
+						reason: "Failed to write references to clipboard",
+						stage:  "slash",
+					}
+				}
+				return slashResultMsg{feedback: "Copied references to clipboard"}
+			}
+
+			if m.focusRef {
+				refs := m.getActiveReferences()
+				if len(refs) == 0 {
+					return appErrMsg{
+						err:    fmt.Errorf("no references to copy"),
+						reason: "No references in history to copy",
+						stage:  "slash",
+					}
+				}
+				refText := formatReferences(refs, 80)
+				if err := clipboard.WriteAll(refText); err != nil {
+					return appErrMsg{
+						err:    err,
+						reason: "Failed to write references to clipboard",
+						stage:  "slash",
+					}
+				}
+				return slashResultMsg{feedback: "Copied references to clipboard"}
+			}
+
 			var lastResponse string
 			for i := len(m.history) - 1; i >= 0; i-- {
 				if m.history[i].Role == "assistant" {
@@ -341,7 +381,8 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				"  /rerankerpool <N|auto> - Set the candidate pool size for the reranker (0/auto = dynamic)\n" +
 				"  /mode <strict|hybrid>- Switch RAG mode (strict closed-book vs hybrid general-knowledge)\n" +
 				"  /system <prompt>    - Update the custom LLM system prompt\n" +
-				"  /copy               - Copy the last assistant response to the clipboard\n" +
+				"  /copy               - Copy the last response (or references if ref panel is focused) to the clipboard\n" +
+				"  /copy ref           - Copy the last retrieved references to the clipboard\n" +
 				"  /copy all           - Copy the entire conversation transcript to the clipboard\n" +
 				"  /save <file.md>     - Write the last response directly to a markdown file\n" +
 				"  /save all <file.md> - Write the entire conversation history to a markdown file\n" +
@@ -350,7 +391,8 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				"Keyboard Shortcuts:\n" +
 				"  Ctrl+C              - Quit the application\n" +
 				"  Double Escape       - Stop prompt generation (cancel request)\n" +
-				"  Ctrl+Y              - Copy the last assistant response to the clipboard\n" +
+				"  Tab                 - Toggle focus between conversation and references\n" +
+				"  Ctrl+Y              - Copy the last response (or references if ref panel is focused) to the clipboard\n" +
 				"  Ctrl+R              - Toggle Markdown rendering vs. Raw Source\n" +
 				"  Up / Down           - Navigate prompt history"
 			return systemLogMsg{

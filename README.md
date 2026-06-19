@@ -10,6 +10,8 @@ Designed around the **Nord color palette**, QQuestio delivers a visually stunnin
 
 - **Non-Blocking Async Architecture**: Full background execution of HTTP embeddings, vector similarity search, reranking, and SSE stream reading via structured `tea.Cmd` loops.
 - **Real-time SSE Streaming**: High-performance, self-chaining Server-Sent Events parser that prints LLM responses token-by-token directly into a scrollable viewport.
+- **Two-Panel TUI Layout**: Split-screen design dividing the screen into a main chat panel (2/3 width) and a scrollable side panel for retrieved document references (1/3 width) that can be focused and scrolled independently.
+- **Automatic Session Recovery & Management**: Chronological timestamp-based sessions stored locally in `$HOME/config/qquestio/sessions`, with quick resume flags (`-c` to recover the latest session or `-c <sessionid>` for specific sessions), printing the active session ID upon quit.
 - **Model-Agnostic Generic Reranking**: Optional, generic, and provider-agnostic reranking step that automatically expands the database candidate pool, query-scores retrieved points, and selects the top documents.
 - **Full-Corpus Recall by Default**: Uses Qdrant's native exact brute-force search (`params.exact=true`) to score every single vector in the collection server-side, with sub-second latency even for million-scale corpora. An optional `/cap` (or `--search-cap` / `SEARCH_CAP`) switches to HNSW approximate search for reduced latency on extremely large collections.
 - **Dynamic Slash Commands**: Modify parameters at runtime (e.g., active collection, search limits, or system prompt) or copy transcripts without restarting the TUI.
@@ -118,7 +120,8 @@ Change state parameters or trigger clipboard actions at runtime from the prompt 
 - **`/rerank <on|off>`**: Enables or bypasses the optional reranker step.
 - **`/cache [status|refresh|warmup|clear|dir]`**: Inspect or control the on-disk corpus cache. `/cache warmup` pre-populates the cache for offline use.
 - **`/system <prompt...>`**: Re-defines the active RAG system instructions for subsequent turns.
-- **`/copy`**: Copies the last assistant response text to the clipboard.
+- **`/copy`**: Copies the last assistant response (or the retrieved references if the references panel is focused) to the clipboard.
+- **`/copy ref`** (or **`/copy refs`**): Copies the last retrieved references directly to the clipboard.
 - **`/copy all`**: Formats and copies the entire clean conversation transcript to the clipboard.
 - **`/save <file.md>`** (or **`/write <file.md>`**): Saves the last assistant response directly to a local markdown file.
 - **`/save all <file.md>`** (or **`/write all <file.md>`**): Formats and writes the entire conversation transcript (in full Markdown with headers, prompts, code fences, and retrieved references) directly to a local markdown file.
@@ -161,12 +164,35 @@ Keyboard shortcuts are active global overlays and can be triggered without losin
 - **`Ctrl+C`**: Cancel in-flight request, close connections, and quit the application safely.
 - **`Double Escape` (press `Esc` twice)**: Cancel in-flight prompt generation (embeddings, search, reranking, or streaming) and return gracefully to the idle state.
 - **`Ctrl+R`**: Toggle viewport view mode between styled Glamour Markdown and raw Markdown source.
-- **`Ctrl+Y`**: Copy the last assistant response directly to your system clipboard.
-- **`Ctrl+Up` / `Ctrl+Down`**: Scroll the response viewport up and down by single lines.
-- **`PageUp` / `PageDown`**: Scroll the response viewport up and down by half pages.
+- **`Tab`**: Toggle active focus between the main chat panel and the right-hand references panel (visually marked by a highlighted border).
+- **`Mouse Click`**: Click on either panel to focus it directly.
+- **`Ctrl+Y`**: Copy the last response (or retrieved references if the references panel is focused) directly to your system clipboard.
+- **`Ctrl+Up` / `Ctrl+Down`**: Scroll the focused viewport (chat response or references panel) up and down by single lines.
+- **`PageUp` / `PageDown`**: Scroll the focused viewport up and down by half pages.
 - **`Up` / `Down` arrow keys**: Navigate back and forward through your entered prompts history (when cursor is focused on the input prompt line).
 
 ---
+## 💾 Session Management
+
+QQuestio automatically tracks and serializes your conversations to keep your context saved between runs.
+
+- **Storage Path**: `$HOME/config/qquestio/sessions/*.json`
+- **Session IDs**: Chronological timestamp identifiers (e.g. `20260619-114154`).
+- **Exiting TUI**: Upon exit, the active session is saved, and its ID is printed to the terminal:
+  ```bash
+  Session ID: 20260619-114154
+  ```
+- **Resuming the Last Session**: Resume your last conversation and settings:
+  ```bash
+  ./qquestio -c
+  ```
+- **Resuming a Specific Session**: Recover a specific past session by ID:
+  ```bash
+  ./qquestio -c 20260619-114154
+  ```
+
+---
+
 ## 🔌 Skills System (Local Agentic Tools)
 
 QQuestio features a plug-and-play **Skills System** that allows the LLM to dynamically execute local actions on your machine and incorporate their results directly into the conversation.

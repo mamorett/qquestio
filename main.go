@@ -6,11 +6,31 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 func main() {
+	// 1. Manually parse optional session flags: -c [session_id]
+	var loadSession bool
+	var sessionIDToLoad string
+
+	for i := 1; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		if arg == "-c" || arg == "--c" {
+			loadSession = true
+			if i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-") {
+				sessionIDToLoad = os.Args[i+1]
+				os.Args = append(os.Args[:i+1], os.Args[i+2:]...)
+			} else {
+				sessionIDToLoad = "last"
+			}
+			os.Args = append(os.Args[:i], os.Args[i+1:]...)
+			break
+		}
+	}
+
 	// Parse version flags
 	versionFlag := flag.Bool("version", false, "Print version information and exit")
 	vFlag := flag.Bool("v", false, "Print version information and exit")
@@ -42,9 +62,44 @@ func main() {
 	defer cancel()
 
 	m := NewModel(ctx, cfg)
+
+	if loadSession {
+		if sessionIDToLoad == "last" {
+			lastID, err := GetLastSessionID()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "No previous session found: %v\n", err)
+			} else {
+				sessionIDToLoad = lastID
+			}
+		}
+		if sessionIDToLoad != "last" && sessionIDToLoad != "" {
+			if err := m.loadSession(sessionIDToLoad); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to load session %q: %v\n", sessionIDToLoad, err)
+			} else {
+				m.statusMsg = fmt.Sprintf("Loaded session %s", sessionIDToLoad)
+			}
+		}
+	}
+
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	if _, err := p.Run(); err != nil {
+	finalModel, err := p.Run()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Fatal: %v\n", err)
 		os.Exit(1)
+	}
+
+	if fm, ok := finalModel.(*Model); ok {
+		if !fm.hasUserPrompt() {
+			fmt.Printf("\n👋 Thank you for using QQuestio!\n\n")
+		} else {
+			if err := fm.saveSession(); err != nil {
+				fmt.Fprintf(os.Stderr, "\n⚠️  Warning: Failed to save session: %v\n", err)
+			} else {
+				fmt.Printf("\n👋 Thank you for using QQuestio!\n")
+				fmt.Printf("💾 Session successfully saved: %s\n", fm.sessionID)
+				fmt.Printf("🔄 To recall this session, run:      ./qquestio -c %s\n", fm.sessionID)
+				fmt.Printf("⏮️  To resume the most recent session: ./qquestio -c\n\n")
+			}
+		}
 	}
 }

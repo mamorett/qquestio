@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"qquestio/internal/rag"
 	"strings"
 	"testing"
@@ -211,3 +213,212 @@ func TestComputeSearchDocs(t *testing.T) {
 		t.Errorf("Reranker custom pool 600, docs=10, expand=1: expected 600, got %d", got)
 	}
 }
+
+func TestSplitPanelFocusAndCopy(t *testing.T) {
+	cfg := Config{DefaultCollection: "default"}
+	m := NewModel(context.Background(), cfg)
+
+	if m.focusRef {
+		t.Error("expected initial focusRef to be false")
+	}
+
+	// Test Tab key focus toggle
+	tabMsg := tea.KeyMsg{Type: tea.KeyTab}
+	model, _ := m.Update(tabMsg)
+	m = model.(*Model)
+
+	if !m.focusRef {
+		t.Error("expected focusRef to be true after Tab")
+	}
+
+	model, _ = m.Update(tabMsg)
+	m = model.(*Model)
+
+	if m.focusRef {
+		t.Error("expected focusRef to be false after second Tab")
+	}
+
+	// Test Mouse click focus switch
+	m.width = 90
+	m.height = 30
+	// Click on references panel (msg.X >= mainWidth, where mainWidth = 90 - 30 = 60)
+	mouseRefClick := tea.MouseMsg{
+		X: 70,
+		Y: 10,
+	}
+	model, _ = m.Update(mouseRefClick)
+	m = model.(*Model)
+	if !m.focusRef {
+		t.Error("expected focusRef to be true after clicking on the right panel")
+	}
+
+	// Click on main panel (msg.X < mainWidth)
+	mouseMainClick := tea.MouseMsg{
+		X: 30,
+		Y: 10,
+	}
+	model, _ = m.Update(mouseMainClick)
+	m = model.(*Model)
+	if m.focusRef {
+		t.Error("expected focusRef to be false after clicking on the left panel")
+	}
+}
+
+func TestSessionSaveAndLoad(t *testing.T) {
+	// Setup custom home dir for the test to avoid overwriting actual user config
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+
+	cfg := Config{DefaultCollection: "default"}
+	m := NewModel(context.Background(), cfg)
+	m.sessionID = "test-session-123"
+	m.collection = "test-collection"
+	m.searchLimit = 42
+	m.history = []ConversationTurn{
+		{Role: "user", Content: "Hello session test"},
+		{Role: "assistant", Content: "I am tested", References: []rag.QdrantPoint{
+			{ID: "point1", Score: 0.99, Payload: map[string]interface{}{"text": "sample"}},
+		}},
+	}
+
+	// Save
+	if err := m.saveSession(); err != nil {
+		t.Fatalf("failed to save session: %v", err)
+	}
+
+	// Load into a new model
+	m2 := NewModel(context.Background(), cfg)
+	if err := m2.loadSession("test-session-123"); err != nil {
+		t.Fatalf("failed to load session: %v", err)
+	}
+
+	// Verify loaded properties
+	if m2.sessionID != "test-session-123" {
+		t.Errorf("expected session ID 'test-session-123', got %q", m2.sessionID)
+	}
+	if m2.collection != "test-collection" {
+		t.Errorf("expected collection 'test-collection', got %q", m2.collection)
+	}
+	if m2.searchLimit != 42 {
+		t.Errorf("expected searchLimit 42, got %d", m2.searchLimit)
+	}
+	if len(m2.history) != 2 {
+		t.Errorf("expected history length 2, got %d", len(m2.history))
+	}
+	if m2.history[0].Content != "Hello session test" {
+		t.Errorf("expected turn content 'Hello session test', got %q", m2.history[0].Content)
+	}
+	if len(m2.history[1].References) != 1 {
+		t.Errorf("expected 1 reference, got %d", len(m2.history[1].References))
+	}
+	if len(m2.inputHistory) != 1 || m2.inputHistory[0] != "Hello session test" {
+		t.Errorf("expected inputHistory to contain ['Hello session test'], got %v", m2.inputHistory)
+	}
+	if m2.historyIndex != 1 {
+		t.Errorf("expected historyIndex to be 1, got %d", m2.historyIndex)
+	}
+}
+
+func TestMouseLeakFilter(t *testing.T) {
+	cfg := Config{DefaultCollection: "default"}
+	m := NewModel(context.Background(), cfg)
+
+	// Send an SGR mouse scroll sequence: \x1b[<65;258;21M
+	sequence := []tea.KeyMsg{
+		{Type: tea.KeyEscape},
+		{Type: tea.KeyRunes, Runes: []rune{'['}},
+		{Type: tea.KeyRunes, Runes: []rune{'<'}},
+		{Type: tea.KeyRunes, Runes: []rune{'6'}},
+		{Type: tea.KeyRunes, Runes: []rune{'5'}},
+		{Type: tea.KeyRunes, Runes: []rune{';'}},
+		{Type: tea.KeyRunes, Runes: []rune{'2'}},
+		{Type: tea.KeyRunes, Runes: []rune{'5'}},
+		{Type: tea.KeyRunes, Runes: []rune{'8'}},
+		{Type: tea.KeyRunes, Runes: []rune{';'}},
+		{Type: tea.KeyRunes, Runes: []rune{'2'}},
+		{Type: tea.KeyRunes, Runes: []rune{'1'}},
+		{Type: tea.KeyRunes, Runes: []rune{'M'}},
+	}
+
+	for _, msg := range sequence {
+		model, _ := m.Update(msg)
+		m = model.(*Model)
+	}
+
+	// The textinput value should remain empty (none of the leaked characters should have entered it)
+	if m.textInput.Value() != "" {
+		t.Errorf("expected textinput to remain empty, but got %q", m.textInput.Value())
+	}
+}
+
+func TestEmptySessionNotSaved(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+
+	cfg := Config{DefaultCollection: "default"}
+	m := NewModel(context.Background(), cfg)
+	m.sessionID = "test-empty-session"
+
+	// Add only a system/command turn, but no user prompt
+	m.history = []ConversationTurn{
+		{Role: "system", Content: "Command executed: help"},
+	}
+
+	if err := m.saveSession(); err != nil {
+		t.Fatalf("saveSession returned unexpected error: %v", err)
+	}
+
+	// Verify that the file was not created
+	dir, err := GetSessionsDir()
+	if err != nil {
+		t.Fatalf("failed to get sessions dir: %v", err)
+	}
+	filePath := filepath.Join(dir, "test-empty-session.json")
+	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
+		t.Errorf("expected session file %s to not exist, but it was found", filePath)
+	}
+}
+
+func TestTruncateMiddle(t *testing.T) {
+	tests := []struct {
+		input  string
+		maxLen int
+		expect string
+	}{
+		{"hello.txt", 10, "hello.txt"},
+		{"abcdefghij.txt", 10, "abc...txt"},
+		{"abcdefghijkl.txt", 12, "abcd....txt"},
+		{"abcdef", 3, "abc"},
+		{"abcdef", 5, "ab..."},
+	}
+
+	for _, tc := range tests {
+		got := truncateMiddle(tc.input, tc.maxLen)
+		if got != tc.expect {
+			t.Errorf("truncateMiddle(%q, %d): expected %q, got %q", tc.input, tc.maxLen, tc.expect, got)
+		}
+	}
+}
+
+func TestFormatReferencesNegativeScores(t *testing.T) {
+	p := rag.QdrantPoint{
+		ID:    "1",
+		Score: -0.2673,
+		Payload: map[string]interface{}{
+			"file_name":   "Desert.md",
+			"chunk_index": float64(262),
+			"text":        "Sun was setting.",
+		},
+	}
+
+	out := formatReferences([]rag.QdrantPoint{p}, 40)
+	if !strings.Contains(out, "Score: -0.2673") {
+		t.Errorf("expected score formatting for negative value -0.2673, but output was:\n%s", out)
+	}
+	if !strings.Contains(out, "Desert.md") {
+		t.Errorf("expected output to contain Desert.md, but got:\n%s", out)
+	}
+}
+
+
+
