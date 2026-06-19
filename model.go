@@ -24,12 +24,13 @@ import (
 type appState int
 
 const (
-	stateIdle      appState = iota // Waiting for user input
-	stateEmbedding                 // Generating embedding vector
-	stateSearching                 // Querying Qdrant
-	stateReranking                 // Reranking retrieved documents
-	stateStreaming                 // Receiving LLM SSE chunks
-	stateError                     // Displaying error, input still active
+	stateIdle        appState = iota // Waiting for user input
+	stateEmbedding                   // Generating embedding vector
+	stateSearching                   // Querying Qdrant
+	stateReranking                   // Reranking retrieved documents
+	stateStreaming                   // Receiving LLM SSE chunks
+	stateError                       // Displaying error, input still active
+	stateConfirmQuit                  // Awaiting exit confirmation (first Ctrl+C pressed)
 )
 
 type ConversationTurn struct {
@@ -111,6 +112,91 @@ type Model struct {
 	ctx context.Context
 }
 
+// estimateContextTokens returns a rough token count of what is ACTUALLY sent
+// to the LLM: turn content (Q&A text) + the current query's retrieved chunks.
+// Does NOT count stored References from past turns because those are no longer
+// injected into the LLM prompt (they live only in the references panel).
+func (m *Model) estimateContextTokens() int {
+	total := 0
+	for _, turn := range m.history {
+		total += len(turn.Content) / 4
+	}
+	// Count the current query's retrieved context (not yet in history)
+	for _, pt := range m.lastPoints {
+		total += len(pt.ExtractPrimaryText()) / 4
+	}
+	return total
+}
+
+// compactHistory summarizes the oldest conversation turns beyond the keepPairs
+// threshold, replacing them with a single system-turn summary. This prevents
+// the conversation from growing unboundedly and keeps LLM context usage in check.
+// keepPairs is the number of recent Q&A pairs (user+assistant) to keep intact.
+func (m *Model) compactHistory(keepPairs int) {
+	if keepPairs < 1 {
+		keepPairs = 1
+	}
+	// Find the index of each user turn (each represents a Q&A pair boundary).
+	var userIdx []int
+	for i, t := range m.history {
+		if t.Role == "user" {
+			userIdx = append(userIdx, i)
+		}
+	}
+	if len(userIdx) <= keepPairs {
+		return // nothing old enough to compact
+	}
+	// cutoff is the index of the first turn we keep.
+	cutoff := userIdx[len(userIdx)-keepPairs]
+
+	// Build a brief plain-text summary of the compacted turns.
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("[ Context compacted — %d older Q&A pair(s) summarized ]\n\n", len(userIdx)-keepPairs))
+	for i := 0; i < cutoff; i++ {
+		t := m.history[i]
+		switch t.Role {
+		case "user":
+			sb.WriteString("Q: " + t.Content + "\n")
+		case "assistant":
+			content := t.Content
+			if len(content) > 300 {
+				content = content[:300] + "…"
+			}
+			sb.WriteString("A: " + content + "\n\n")
+		}
+	}
+	summary := ConversationTurn{
+		Role:    "system",
+		Content: strings.TrimSpace(sb.String()),
+	}
+	m.history = append([]ConversationTurn{summary}, m.history[cutoff:]...)
+}
+
+// maybeAutoCompact fires context compaction when the estimated token count
+// exceeds 85% of the configured ContextLimit. No-op when ContextLimit == 0.
+func (m *Model) maybeAutoCompact() {
+	if m.cfg.ContextLimit <= 0 {
+		return
+	}
+	threshold := int(float64(m.cfg.ContextLimit) * 0.85)
+	if m.estimateContextTokens() <= threshold {
+		return
+	}
+	before := len(m.history)
+	m.compactHistory(3)
+	after := len(m.history)
+	m.history = append(m.history, ConversationTurn{
+		Role: "system",
+		Content: fmt.Sprintf(
+			"[ Auto-compacted: %d entr%s removed — context reached ≥85%% of %s token limit ]",
+			before-after,
+			map[bool]string{true: "y", false: "ies"}[before-after == 1],
+			formatNumber(m.cfg.ContextLimit),
+		),
+	})
+	m.statusMsg = fmt.Sprintf("Context auto-compacted (≥85%% of %s token limit)", formatNumber(m.cfg.ContextLimit))
+}
+
 func NewModel(ctx context.Context, cfg Config) *Model {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
@@ -167,27 +253,33 @@ func (m *Model) Init() tea.Cmd {
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Filter out leaked SGR mouse sequences from terminal input parsing buffer issues
+	// Filter out leaked CSI/SGR mouse escape sequences that some terminals
+	// emit as individual KeyMsg events instead of as tea.MouseMsg.
+	//
+	// Any CSI sequence starts with ESC [ (leakState 1→2) and continues with
+	// parameter bytes in the range 0x30-0x3F (digits 0-9, ;, <, =, >, ?)
+	// followed by a single letter terminator. Mouse sequences in both the
+	// legacy X10 format (ESC [ A ; B ; C M) and the SGR format
+	// (ESC [ < A ; B ; C M / m) are handled by the same generic rule:
+	// once we see ESC [, swallow everything up to and including the first
+	// letter we encounter.
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		if keyMsg.Type == tea.KeyEscape {
 			m.leakState = 1
+			// Don't return here — ESC is also used for double-Esc cancel.
 		} else if m.leakState == 1 && len(keyMsg.Runes) > 0 && keyMsg.Runes[0] == '[' {
+			// ESC [ seen → enter CSI sequence
 			m.leakState = 2
 			return m, nil
-		} else if m.leakState == 2 && len(keyMsg.Runes) > 0 && keyMsg.Runes[0] == '<' {
-			m.leakState = 3
-			return m, nil
-		} else if m.leakState == 3 {
-			if len(keyMsg.Runes) > 0 {
-				r := keyMsg.Runes[0]
-				if (r >= '0' && r <= '9') || r == ';' || r == 'M' || r == 'm' {
-					if r == 'M' || r == 'm' {
-						m.leakState = 0
-					}
-					return m, nil
-				}
+		} else if m.leakState >= 2 && len(keyMsg.Runes) > 0 {
+			r := keyMsg.Runes[0]
+			// CSI parameter bytes: 0x30-0x3F  (0-9, ;, <, =, >, ?)
+			if r >= 0x30 && r <= 0x3F {
+				return m, nil // consume parameter byte
 			}
+			// Any letter terminates the sequence (M, m, A, B, H, …)
 			m.leakState = 0
+			return m, nil // consume terminator
 		} else {
 			m.leakState = 0
 		}
@@ -202,6 +294,37 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if msg.Type != tea.KeyEscape {
 			m.escCount = 0
+		}
+
+		// --- Quit confirmation dialog: first Ctrl+C arms it, second confirms ---
+		if m.state == stateConfirmQuit {
+			switch msg.Type {
+			case tea.KeyCtrlC:
+				if m.cancelRequest != nil {
+					m.cancelRequest()
+				}
+				return m, tea.Quit
+			case tea.KeyEscape:
+				m.state = stateIdle
+				m.statusMsg = "Quit cancelled"
+				m.updateViewport()
+				return m, nil
+			case tea.KeyRunes:
+				switch strings.ToLower(string(msg.Runes)) {
+				case "y":
+					if m.cancelRequest != nil {
+						m.cancelRequest()
+					}
+					return m, tea.Quit
+				case "n":
+					m.state = stateIdle
+					m.statusMsg = "Quit cancelled"
+					m.updateViewport()
+					return m, nil
+				}
+			}
+			// Swallow all other keys while the dialog is visible.
+			return m, nil
 		}
 		switch msg.Type {
 		case tea.KeyEscape:
@@ -226,10 +349,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case tea.KeyCtrlC:
-			if m.cancelRequest != nil {
-				m.cancelRequest()
-			}
-			return m, tea.Quit
+			// First Ctrl+C arms the confirmation dialog instead of quitting immediately.
+			m.state = stateConfirmQuit
+			m.updateViewport()
+			return m, nil
 		case tea.KeyCtrlY:
 			cmd := m.copyLastResponseCmd()
 			if cmd != nil {
@@ -336,6 +459,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case searchResultMsg:
 		m.refViewport.GotoTop()
+		m.maybeAutoCompact()
 		if m.cfg.RerankerURL != "" && !m.disableReranker {
 			m.state = stateReranking
 			m.statusMsg = "Reranking retrieved documents..."
@@ -352,6 +476,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case rerankResultMsg:
 		m.refViewport.GotoTop()
+		m.maybeAutoCompact()
 		m.ragContext = msg.context
 		m.lastPoints = msg.points
 		m.state = stateStreaming
@@ -559,9 +684,17 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner, spinnerCmd = m.spinner.Update(msg)
 		cmds = append(cmds, spinnerCmd)
 	}
-	var tiCmd tea.Cmd
-	m.textInput, tiCmd = m.textInput.Update(msg)
-	cmds = append(cmds, tiCmd)
+	// Only forward keyboard messages to the text input.
+	// Forwarding MouseMsg causes mouse coordinates to be inserted as
+	// printable text when the user scrolls (the terminal's mouse reporting
+	// escape sequences leak into the input buffer).
+	if _, isMouse := msg.(tea.MouseMsg); !isMouse {
+		if _, isWindowSize := msg.(tea.WindowSizeMsg); !isWindowSize {
+			var tiCmd tea.Cmd
+			m.textInput, tiCmd = m.textInput.Update(msg)
+			cmds = append(cmds, tiCmd)
+		}
+	}
 
 	if m.state == stateStreaming || m.state == stateIdle || m.state == stateError {
 		var shouldForward = true
@@ -705,7 +838,27 @@ func (m *Model) renderHeader() string {
 		expandText = fmt.Sprintf("±%d", m.searchExpand)
 	}
 
-	qdrantInfo := fmt.Sprintf(" %s %s  %s  %s %s  %s %s %d  %s  %s %s  %s  %s %s  %s  %s %s  %s  %s %s%s",
+	// Context usage display (when ContextLimit > 0)
+	var contextStr string
+	if m.cfg.ContextLimit > 0 {
+		tokens := m.estimateContextTokens()
+		pct := int(float64(tokens) * 100.0 / float64(m.cfg.ContextLimit))
+		ctxColor := nord14 // green ≤ 70%
+		if pct >= 85 {
+			ctxColor = nord11 // red ≥85%
+		} else if pct >= 70 {
+			ctxColor = nord13 // yellow 70–84%
+		}
+		contextStr = fmt.Sprintf("  %s  %s %s/%s (%d%%)",
+			delimStyle.Render("│"),
+			labelStyle.Render("Ctx:"),
+			lipgloss.NewStyle().Foreground(ctxColor).Render(formatNumber(tokens)),
+			formatNumber(m.cfg.ContextLimit),
+			pct,
+		)
+	}
+
+	qdrantInfo := fmt.Sprintf(" %s %s  %s  %s %s  %s %s %d  %s  %s %s  %s  %s %s  %s  %s %s  %s  %s %s%s%s",
 		labelStyle.Render("DB:"), valueStyle.Render(m.cfg.QdrantURL),
 		delimStyle.Render("│"),
 		labelStyle.Render("Col:"), valueStyle.Render(m.collection),
@@ -719,6 +872,7 @@ func (m *Model) renderHeader() string {
 		labelStyle.Render("Cache:"), valueStyle.Render(cacheText),
 		delimStyle.Render("│"),
 		labelStyle.Render("Mode:"), modeView,
+		contextStr,
 		statsStr,
 	)
 	line2Pad := m.width - lipgloss.Width(qdrantInfo)
@@ -772,6 +926,19 @@ func (m *Model) renderHeader() string {
 }
 
 func (m *Model) renderFooter() string {
+	// Quit confirmation bar replaces the normal footer.
+	if m.state == stateConfirmQuit {
+		confirmText := " ⚠  Exit QQuestio?  Press Ctrl+C or Y to confirm  ·  Esc or N to cancel "
+		padding := m.width - lipgloss.Width(confirmText)
+		if padding > 0 {
+			confirmText += strings.Repeat(" ", padding)
+		}
+		return lipgloss.NewStyle().
+			Foreground(nord6).
+			Background(nord11).
+			Bold(true).
+			Render(confirmText)
+	}
 	styles := DefaultStyles()
 	inputView := m.textInput.View()
 	footerText := " " + inputView

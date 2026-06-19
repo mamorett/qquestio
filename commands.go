@@ -69,6 +69,26 @@ func (m *Model) computeSearchDocs(docs, expand int) int {
 	return searchDocs
 }
 
+// computeRerankerPool returns the number of primary candidates to forward to
+// the reranker API. This is intentionally decoupled from computeSearchDocs:
+// the search pool is large to maximise recall; the reranker pool is smaller
+// to protect calibration accuracy. Small-to-medium reranker models (e.g.
+// Qwen3-Reranker-4B) degrade noticeably beyond ~20 candidates per call.
+// The user can override this cap via /rerankerpool <N>.
+func (m *Model) computeRerankerPool() int {
+	if m.rerankerPool > 0 {
+		return m.rerankerPool
+	}
+	pool := m.searchLimit * 3
+	if pool < 10 {
+		pool = 10
+	}
+	if pool > 20 {
+		pool = 20
+	}
+	return pool
+}
+
 //
 //   - Cap set (m.searchCap > 0): use Qdrant's HNSW query API with the cap as
 //     the candidate pool size. Fast, but bounded by the cap (approximate recall).
@@ -283,7 +303,12 @@ func (m *Model) executeSkillCmd(name, args string) tea.Cmd {
 //  1. Reranks only the PRIMARY top-N matches (not the already-expanded set),
 //     so the reranker's score reflects pure relevance, not the artificially
 //     inflated rank of duplicate adjacent chunks.
-//  2. After reranking, takes the top-`searchLimit` reranked primaries and
+//  2. Caps the candidate pool sent to the reranker via computeRerankerPool()
+//     so accuracy-sensitive small models (e.g. Qwen3-Reranker-4B) are not
+//     overwhelmed by the full widened search pool.
+//  3. Uses ExtractPrimaryText() (not ExtractText()) so the reranker receives
+//     a single clean passage per document instead of a multi-field blob.
+//  4. After reranking, takes the top-`searchLimit` reranked primaries and
 //     re-applies ±expand around them using the cached ExpansionMap. This
 //     makes /expand actually work in the rerank path: the LLM sees the
 //     full document slice around the reranked matches, not just fragments.
@@ -303,10 +328,30 @@ func (m *Model) rerankPointsCmd(result searchResultMsg) tea.Cmd {
 			return rerankResultMsg{context: "", points: nil}
 		}
 
-		// Extract texts for reranking (only the primaries).
+		// Cap the candidate pool sent to the reranker to preserve accuracy.
+		// The search pool is intentionally larger for recall; the reranker
+		// pool is smaller because reranker models are calibration-sensitive.
+		rerankCap := m.computeRerankerPool()
+		if len(primaries) > rerankCap {
+			primaries = primaries[:rerankCap]
+		}
+
+		// Extract texts for reranking. To ensure the reranker has the EXACT SAME
+		// context quality as the non-reranked path, we apply the chunk expansion
+		// (±N adjacent chunks) to each primary candidate BEFORE scoring. This prevents
+		// the reranker from degrading due to missing context.
 		var texts []string
 		for _, pt := range primaries {
-			texts = append(texts, pt.ExtractText())
+			expandedCtx, _ := rag.ApplyExpansionToPrimaries(
+				[]rag.QdrantPoint{pt},
+				result.expansionMap,
+				result.expand,
+			)
+			// Fallback if expansion fails (e.g. no chunk index)
+			if expandedCtx == "" {
+				expandedCtx = pt.ExtractText()
+			}
+			texts = append(texts, expandedCtx)
 		}
 
 		rerankItems, err := rag.Rerank(
@@ -421,32 +466,36 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 	msgs = append(msgs, rag.ChatMessage{Role: "system", Content: system})
 
 	// 2. Conversation history (multi-turn)
+	// Past turns are sent as clean Q&A pairs WITHOUT re-injecting the full
+	// retrieved chunks, which bloats the context.
+	// However, to support follow-up questions like "tell me more about that doc",
+	// we inject a lightweight summary of the IMMEDIATELY PRECEDING turn's references.
 	for i := 0; i < len(m.history); i++ {
 		turn := m.history[i]
 		if turn.Role == "user" {
-			// Locate subsequent assistant turn to extract references if any
-			var pastRefs []rag.QdrantPoint
-			if i+1 < len(m.history) && m.history[i+1].Role == "assistant" {
-				pastRefs = m.history[i+1].References
-			}
-
-			var histContextBuilder strings.Builder
-			if len(pastRefs) > 0 {
-				histContextBuilder.WriteString("Retrieved Context Chunks from Knowledge Base:\n")
-				for idx, pt := range pastRefs {
-					source := extractDocumentName(pt.Payload)
-					textStr := pt.ExtractText()
-					pointIDStr := fmt.Sprintf("%v", pt.ID)
-
-					docName := source
-					if docName == "" {
-						docName = fmt.Sprintf("ID %s", pointIDStr)
+			userMsg := "Question: " + turn.Content
+			
+			// If this is the VERY LAST user turn in history, and the subsequent
+			// assistant turn had references, inject a short hint.
+			if i == len(m.history)-2 && m.history[i+1].Role == "assistant" {
+				pastRefs := m.history[i+1].References
+				if len(pastRefs) > 0 {
+					var hint strings.Builder
+					hint.WriteString("\n[Hint: For context, the assistant's previous answer referenced these documents: ")
+					for idx, pt := range pastRefs {
+						docName := extractDocumentName(pt.Payload)
+						if docName == "" {
+							docName = fmt.Sprintf("ID %v", pt.ID)
+						}
+						hint.WriteString(docName)
+						if idx < len(pastRefs)-1 {
+							hint.WriteString(", ")
+						}
 					}
-					histContextBuilder.WriteString(fmt.Sprintf("--- Chunk %d | Document: %s ---\n%s\n", idx+1, docName, textStr))
+					hint.WriteString("]")
+					userMsg += hint.String()
 				}
-				histContextBuilder.WriteString("---\n\n")
 			}
-			userMsg := fmt.Sprintf("%sQuestion: %s", histContextBuilder.String(), turn.Content)
 			msgs = append(msgs, rag.ChatMessage{Role: "user", Content: userMsg})
 		} else if turn.Role == "assistant" {
 			msgs = append(msgs, rag.ChatMessage{Role: "assistant", Content: turn.Content})

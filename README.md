@@ -84,6 +84,7 @@ QQuestio supports three configuration methods. Values are merged with the follow
 | `RERANKER_API_KEY` / `reranker_api_key` | Optional API Key for the reranker endpoint | No | `your-reranker-key` |
 | `RERANKER_MODEL` / `reranker_model` | Optional model name for the rerank endpoint | No | `bge-reranker-large` |
 | `SEARCH_CAP` / `search_cap` / `--search-cap` | Optional upper bound on the Qdrant search candidate pool. `0` (default) = no cap, search the full corpus. See [Search Scope vs. Return Count](#-search-scope-vs-return-count) below. | No | `50000` |
+| `CONTEXT_LIMIT` / `context_limit` | Maximum token limit (4-chars ≈ 1 token heuristic). Auto-compaction triggers at 85%. Default is `131072`. Set to `0` to disable auto-compaction. | No | `131072` |
 
 ### 1. Example `config.json`
 ```json
@@ -100,7 +101,8 @@ QQuestio supports three configuration methods. Values are merged with the follow
   "reranker_url": "http://localhost:8080/rerank",
   "reranker_api_key": "your-reranker-key",
   "reranker_model": "bge-reranker-large",
-  "search_cap": 0
+  "search_cap": 0,
+  "context_limit": 131072
 }
 ```
 
@@ -120,6 +122,8 @@ Change state parameters or trigger clipboard actions at runtime from the prompt 
 - **`/rerank <on|off>`**: Enables or bypasses the optional reranker step.
 - **`/cache [status|refresh|warmup|clear|dir]`**: Inspect or control the on-disk corpus cache. `/cache warmup` pre-populates the cache for offline use.
 - **`/system <prompt...>`**: Re-defines the active RAG system instructions for subsequent turns.
+- **`/compact [N]`**: Compacts older history to free up context space, leaving the last `N` Q&A pairs intact (default 3). Auto-triggers at 85% of `CONTEXT_LIMIT`.
+- **`/clear`**: Clears the conversation history, retrieved references, and context strings (retains prompt input history).
 - **`/copy`**: Copies the last assistant response (or the retrieved references if the references panel is focused) to the clipboard.
 - **`/copy ref`** (or **`/copy refs`**): Copies the last retrieved references directly to the clipboard.
 - **`/copy all`**: Formats and copies the entire clean conversation transcript to the clipboard.
@@ -161,7 +165,7 @@ The header bar shows the live values, e.g. `Limit: 10  Cap: none  Mode: strict` 
 Keyboard shortcuts are active global overlays and can be triggered without losing focus on the prompt input line:
 
 - **`Enter`**: Submit prompt query or execute slash command. (In `ERROR` state, clears the error).
-- **`Ctrl+C`**: Cancel in-flight request, close connections, and quit the application safely.
+- **`Ctrl+C`**: Triggers a non-blocking quit confirmation dialog in the footer. Press again or type `Y` to confirm; press `Esc` or type `N` to cancel.
 - **`Double Escape` (press `Esc` twice)**: Cancel in-flight prompt generation (embeddings, search, reranking, or streaming) and return gracefully to the idle state.
 - **`Ctrl+R`**: Toggle viewport view mode between styled Glamour Markdown and raw Markdown source.
 - **`Tab`**: Toggle active focus between the main chat panel and the right-hand references panel (visually marked by a highlighted border).
