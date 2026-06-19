@@ -24,10 +24,24 @@ type Config struct {
 	SearchCap         int    `json:"search_cap,omitempty"`
 }
 
+func getConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err == nil {
+		return fmt.Sprintf("%s/.config/qquestio/config.json", home)
+	}
+	return "config.json"
+}
+
 // loadJSONConfig reads configuration from a config.json file if it exists.
 func loadJSONConfig() (Config, bool) {
 	var cfg Config
-	file, err := os.Open("config.json")
+	configPath := getConfigPath()
+	file, err := os.Open(configPath)
+	if err != nil {
+		if configPath != "config.json" {
+			file, err = os.Open("config.json")
+		}
+	}
 	if err != nil {
 		return cfg, false
 	}
@@ -35,11 +49,12 @@ func loadJSONConfig() (Config, bool) {
 
 	err = json.NewDecoder(file).Decode(&cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to parse config.json: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: failed to parse config file: %v\n", err)
 		return cfg, false
 	}
 	return cfg, true
 }
+
 
 func LoadConfig() (Config, error) {
 	// 1. Start with values from config.json (if present)
@@ -113,7 +128,7 @@ func LoadConfig() (Config, error) {
 				"   export OPENAI_API_KEY=\"optional-openai-key\"\n"+
 				"   export OPENAI_MODEL=\"llama3\"\n"+
 				"   export DEFAULT_COLLECTION=\"documents\"\n\n"+
-				"2. A Local \"config.json\" File in the current directory:\n"+
+				"2. A \"config.json\" File in $HOME/.config/qquestio/config.json or the current directory:\n"+
 				"   {\n"+
 				"     \"qdrant_url\": \"http://localhost:6333\",\n"+
 				"     \"qdrant_api_key\": \"your-key\",\n"+
