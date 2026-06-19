@@ -23,6 +23,10 @@ type Config struct {
 	RerankerModel     string `json:"reranker_model"`
 	SearchCap         int    `json:"search_cap,omitempty"`
 	RerankerPool      int    `json:"reranker_pool,omitempty"`
+	// ContextLimit is the estimated token budget for the conversation history.
+	// When the conversation exceeds 85% of this limit, history is auto-compacted.
+	// Default: 131072 (128k). Set to 0 to disable auto-compaction entirely.
+	ContextLimit int `json:"context_limit,omitempty"`
 }
 
 func getConfigPath() string {
@@ -90,6 +94,17 @@ func LoadConfig() (Config, error) {
 			cfg.RerankerPool = n
 		}
 	}
+	if val := os.Getenv("CONTEXT_LIMIT"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n >= 0 {
+			cfg.ContextLimit = n
+		}
+	}
+
+	// Apply the default context limit when neither JSON nor env configured it.
+	// CONTEXT_LIMIT=0 (or context_limit: 0 in JSON) explicitly disables auto-compact.
+	if cfg.ContextLimit == 0 && os.Getenv("CONTEXT_LIMIT") == "" {
+		cfg.ContextLimit = 131072
+	}
 
 	// 3. Validate and construct super-clear error message if variables are missing
 	var missing []string
@@ -133,7 +148,12 @@ func LoadConfig() (Config, error) {
 				"   export OPENAI_URL=\"http://localhost:4000\"\n"+
 				"   export OPENAI_API_KEY=\"optional-openai-key\"\n"+
 				"   export OPENAI_MODEL=\"llama3\"\n"+
-				"   export DEFAULT_COLLECTION=\"documents\"\n\n"+
+				"   export DEFAULT_COLLECTION=\"documents\"\n"+
+				"   export RERANKER_URL=\"http://localhost:8009\"   # optional\n"+
+				"   export RERANKER_MODEL=\"reranker-model\"         # optional\n"+
+				"   export SEARCH_CAP=\"0\"                          # optional, 0=full-corpus\n"+
+				"   export RERANKER_POOL=\"0\"                       # optional, 0=auto\n"+
+				"   export CONTEXT_LIMIT=\"131072\"                  # optional, 0=disable auto-compact\n\n"+
 				"2. A \"config.json\" File in $HOME/.config/qquestio/config.json or the current directory:\n"+
 				"   {\n"+
 				"     \"qdrant_url\": \"http://localhost:6333\",\n"+
@@ -144,7 +164,12 @@ func LoadConfig() (Config, error) {
 				"     \"openai_url\": \"http://localhost:4000\",\n"+
 				"     \"openai_api_key\": \"optional-openai-key\",\n"+
 				"     \"openai_model\": \"llama3\",\n"+
-				"     \"default_collection\": \"documents\"\n"+
+				"     \"default_collection\": \"documents\",\n"+
+				"     \"reranker_url\": \"http://localhost:8009\",    ← optional\n"+
+				"     \"reranker_model\": \"reranker-model\",         ← optional\n"+
+				"     \"search_cap\": 0,                              ← optional, 0=full-corpus\n"+
+				"     \"reranker_pool\": 0,                           ← optional, 0=auto\n"+
+				"     \"context_limit\": 131072                       ← optional, 0=disable auto-compact\n"+
 				"   }\n"+
 				"========================================================================",
 			strings.Join(missing, "\n  - "),

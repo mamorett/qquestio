@@ -322,6 +322,28 @@ func (pt QdrantPoint) ExtractText() string {
 	return strings.Join(allParts, "\n\n")
 }
 
+// ExtractPrimaryText returns only the main passage text from the first matched
+// primary text key, without appending auxiliary metadata fields.
+//
+// Use this for reranking where clean, single-passage input is critical for model
+// accuracy. Multi-field blobs confuse reranker models (they are tuned on single
+// clean passages). Falls back to ExtractText if no primary key matches.
+func (pt QdrantPoint) ExtractPrimaryText() string {
+	if pt.Payload == nil {
+		return ""
+	}
+	primaryKeys := []string{"text", "content", "document", "page_content", "description", "body", "passage", "chunk", "context"}
+	for _, key := range primaryKeys {
+		if val, ok := pt.Payload[key]; ok {
+			if s, ok := val.(string); ok && s != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	// Fallback: no primary key found, use full extraction.
+	return pt.ExtractText()
+}
+
 type QdrantCollectionInfo struct {
 	Result struct {
 		Status       string `json:"status"`

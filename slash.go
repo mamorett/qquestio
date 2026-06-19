@@ -366,6 +366,43 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				return m.saveLastResponseCmd(filename)()
 			}
 
+		case "/compact":
+			// Default: keep last 3 Q&A pairs; caller can pass a custom count.
+			keepPairs := 3
+			if len(args) == 1 {
+				if n, err := strconv.Atoi(args[0]); err == nil && n >= 1 {
+					keepPairs = n
+				}
+			}
+			before := len(m.history)
+			m.compactHistory(keepPairs)
+			after := len(m.history)
+			removed := before - after
+			if removed == 0 {
+				return slashResultMsg{feedback: fmt.Sprintf("Nothing to compact (≤%d Q&A pairs in history)", keepPairs)}
+			}
+			m.history = append(m.history, ConversationTurn{
+				Role:    "system",
+				Content: fmt.Sprintf("[ Manually compacted: %d entr%s removed, kept last %d Q&A pair(s) ]",
+					removed,
+					map[bool]string{true: "y", false: "ies"}[removed == 1],
+					keepPairs),
+			})
+			m.updateViewport()
+			return slashResultMsg{feedback: fmt.Sprintf("Context compacted: removed %d entries, kept last %d Q&A pair(s)", removed, keepPairs)}
+
+		case "/clear":
+			m.history = nil
+			m.lastPoints = nil
+			m.ragContext = ""
+			m.output = ""
+			m.history = append(m.history, ConversationTurn{
+				Role:    "system",
+				Content: "[ Conversation and references cleared ]",
+			})
+			m.updateViewport()
+			return slashResultMsg{feedback: "Cleared context, conversation history, and references."}
+
 		case "/quit":
 			return quitMsg{}
 
@@ -381,6 +418,8 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				"  /rerankerpool <N|auto> - Set the candidate pool size for the reranker (0/auto = dynamic)\n" +
 				"  /mode <strict|hybrid>- Switch RAG mode (strict closed-book vs hybrid general-knowledge)\n" +
 				"  /system <prompt>    - Update the custom LLM system prompt\n" +
+				"  /compact [N]        - Compact history, keeping last N Q&A pairs (default 3); auto at 85% ctx\n" +
+				"  /clear              - Clear conversation history and references (keeps prompt history)\n" +
 				"  /copy               - Copy the last response (or references if ref panel is focused) to the clipboard\n" +
 				"  /copy ref           - Copy the last retrieved references to the clipboard\n" +
 				"  /copy all           - Copy the entire conversation transcript to the clipboard\n" +
@@ -389,7 +428,7 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				"  /help               - Show this help information\n" +
 				"  /quit               - Exit the application\n\n" +
 				"Keyboard Shortcuts:\n" +
-				"  Ctrl+C              - Quit the application\n" +
+				"  Ctrl+C              - Ask for exit confirmation (press again or Y to confirm, Esc/N to cancel)\n" +
 				"  Double Escape       - Stop prompt generation (cancel request)\n" +
 				"  Tab                 - Toggle focus between conversation and references\n" +
 				"  Ctrl+Y              - Copy the last response (or references if ref panel is focused) to the clipboard\n" +
