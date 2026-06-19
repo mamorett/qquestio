@@ -27,6 +27,48 @@ func (m *Model) generateEmbeddingCmd(query string) tea.Cmd {
 // with query-time context expansion.
 //
 // The active path is chosen automatically based on m.searchCap and m.searchMode:
+func (m *Model) computeSearchDocs(docs, expand int) int {
+	if expand < 0 {
+		expand = 0
+	}
+
+	// Compute the base candidate pool size before expansion scaling.
+	basePool := docs
+	if m.cfg.RerankerURL != "" && !m.disableReranker {
+		if m.rerankerPool > 0 {
+			basePool = m.rerankerPool
+		} else {
+			basePool = docs * 5
+			if basePool < 50 {
+				basePool = 50
+			}
+		}
+	}
+
+	searchDocs := basePool
+	if expand > 0 {
+		// Scale candidate pool by (expand + 1) to ensure a sufficiently wide
+		// candidate pool is pulled from the full corpus to account for
+		// similarity spanning adjacent chunks.
+		searchDocs = basePool * (expand + 1)
+
+		// Cap the scaled pool to prevent excessive resource usage, while
+		// honoring explicitly set large reranker pools.
+		capVal := 500
+		if m.rerankerPool > capVal {
+			capVal = m.rerankerPool
+		}
+		if searchDocs > capVal {
+			searchDocs = capVal
+		}
+	}
+
+	if searchDocs < docs {
+		searchDocs = docs
+	}
+	return searchDocs
+}
+
 //
 //   - Cap set (m.searchCap > 0): use Qdrant's HNSW query API with the cap as
 //     the candidate pool size. Fast, but bounded by the cap (approximate recall).
@@ -49,29 +91,7 @@ func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 	return func() tea.Msg {
 		docs := m.searchLimit
 		expand := m.searchExpand
-		if expand < 0 {
-			expand = 0
-		}
-
-		// Compute the size of the primary candidate pool. With reranker enabled
-		// we use a fixed 50. Without reranker, we ALSO scale the pool by expand
-		// so the vector similarity computation "considers many more chunks" as
-		// the user explicitly requested (the expand>0 path must widen recall).
-		searchDocs := docs
-		if m.cfg.RerankerURL != "" && !m.disableReranker {
-			searchDocs = 50
-		} else if expand >= 2 {
-			// Bug 1 fix: scale the primary candidate pool with expand.
-			// limit=10, expand=10 → searchDocs=100; limit=10, expand=20 → 200.
-			// Capped at 500 to avoid blowing up the LLM context window.
-			searchDocs = docs * expand
-			if searchDocs > 500 {
-				searchDocs = 500
-			}
-		}
-		if searchDocs < docs {
-			searchDocs = docs
-		}
+		searchDocs := m.computeSearchDocs(docs, expand)
 
 		// HNSW path: user explicitly opted into a cap (approximate, bounded).
 		// We bypass context expansion here because HNSW results are
@@ -244,6 +264,19 @@ func (m *Model) warmupCacheCmd() tea.Cmd {
 	}
 }
 
+// executeSkillCmd runs the named skill asynchronously.
+func (m *Model) executeSkillCmd(name, args string) tea.Cmd {
+	return func() tea.Msg {
+		skill, ok := m.skills.Get(name)
+		if !ok {
+			return skillResultMsg{err: fmt.Errorf("skill not found: %s", name)}
+		}
+		res, err := skill.Execute(m.ctx, []byte(args))
+		return skillResultMsg{name: name, input: args, output: res, err: err}
+	}
+}
+
+
 // rerankPointsCmd (Optional Stage 2.5) reranks the retrieved Qdrant points
 // using a generic reranker. Critically, it now:
 //
@@ -375,6 +408,14 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 				"4. COMPULSORY SOURCE CITATION: Every claim, statement of fact, or explanation you write must be directly followed by an inline citation to its source document and chunk (e.g. '[Document: filename | Chunk X]'). If a statement cannot be cited, do not write it.\n" +
 				"5. HIGHEST GROUNDING FIDELITY: Treat the retrieved context as the absolute and only source of truth. Prioritize absolute factual correctness over creative writing or helpfulness."
 		}
+	}
+	if toolPrompt := m.skills.ForPrompt(); toolPrompt != "" {
+		system += "\n\n" + toolPrompt + "\n" +
+			"If you decide to use any of the available tools, you must output a tool call block using the exact syntax:\n" +
+			"CALL: <tool_name> <arguments>\n" +
+			"For example:\n" +
+			"CALL: bash ls -la\n" +
+			"Do not output anything else when calling a tool. Stop generating immediately after outputting the CALL block."
 	}
 	msgs = append(msgs, rag.ChatMessage{Role: "system", Content: system})
 

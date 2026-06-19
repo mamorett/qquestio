@@ -281,3 +281,71 @@ func TestHandleSlashCmd_Rerank(t *testing.T) {
 	}
 }
 
+func TestHandleSlashCmd_RerankerPool(t *testing.T) {
+	cfg := Config{DefaultCollection: "default"}
+	m := NewModel(context.Background(), cfg)
+
+	// Default state in Model constructor: cfg.RerankerPool (which is 0 here)
+	if m.rerankerPool != 0 {
+		t.Errorf("expected default rerankerPool to be 0, got %d", m.rerankerPool)
+	}
+
+	// 1. Check showing status with no arguments
+	cmdShow := m.handleSlashCmd("/rerankerpool")
+	msgShow := cmdShow()
+	resShow, ok := msgShow.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msgShow)
+	}
+	if !strings.Contains(resShow.feedback, "auto") {
+		t.Errorf("expected feedback to contain 'auto', got %s", resShow.feedback)
+	}
+
+	// 2. Set to custom size
+	cmdSet := m.handleSlashCmd("/rerankerpool 120")
+	msgSet := cmdSet()
+	resSet, ok := msgSet.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msgSet)
+	}
+	if !strings.Contains(resSet.feedback, "120") {
+		t.Errorf("expected feedback to contain '120', got %s", resSet.feedback)
+	}
+	if m.rerankerPool != 120 {
+		t.Errorf("expected rerankerPool to be 120, got %d", m.rerankerPool)
+	}
+
+	// 3. Check showing status again
+	cmdShow2 := m.handleSlashCmd("/rerankerpool")
+	msgShow2 := cmdShow2()
+	resShow2, ok := msgShow2.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msgShow2)
+	}
+	if !strings.Contains(resShow2.feedback, "120") {
+		t.Errorf("expected feedback to contain '120', got %s", resShow2.feedback)
+	}
+
+	// 4. Set to auto
+	cmdAuto := m.handleSlashCmd("/rerankerpool auto")
+	msgAuto := cmdAuto()
+	resAuto, ok := msgAuto.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msgAuto)
+	}
+	if !strings.Contains(resAuto.feedback, "auto") {
+		t.Errorf("expected feedback to contain 'auto', got %s", resAuto.feedback)
+	}
+	if m.rerankerPool != 0 {
+		t.Errorf("expected rerankerPool to be 0, got %d", m.rerankerPool)
+	}
+
+	// 5. Test invalid argument
+	cmdInvalid := m.handleSlashCmd("/rerankerpool invalid")
+	msgInvalid := cmdInvalid()
+	_, isErr := msgInvalid.(appErrMsg)
+	if !isErr {
+		t.Fatalf("expected appErrMsg for invalid arg, got %T", msgInvalid)
+	}
+}
+

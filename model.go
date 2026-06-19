@@ -47,6 +47,7 @@ type Model struct {
 	collection        string // Active Qdrant collection (init: cfg.DefaultCollection)
 	searchLimit       int    // Number of Qdrant results (default: 5)
 	searchCap         int    // Hard upper bound on candidate pool for Qdrant search (0 = no cap, search full corpus)
+	rerankerPool      int    // Primary candidate pool size for reranker (0 = auto)
 	searchExpand      int    // ±N adjacent chunks to expand each top match from the same document (0 = disabled, 1 = default)
 	searchMode        string // "auto" (default), "exact" (force server-side), or "local" (client-side brute-force using all CPU cores)
 	systemPrompt      string // Custom system prompt (default: built-in RAG prompt)
@@ -122,6 +123,7 @@ func NewModel(ctx context.Context, cfg Config) *Model {
 		collection:      cfg.DefaultCollection,
 		searchLimit:     10,
 		searchCap:       cfg.SearchCap,
+		rerankerPool:    cfg.RerankerPool,
 		searchExpand:    1, // ±1 adjacent chunk from the same document by default
 		searchMode:      "auto",
 		state:           stateIdle,
@@ -290,25 +292,60 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case streamChunkMsg:
 		if msg.done {
-			// Stream complete
-			m.state = stateIdle
-			m.statusMsg = "Ready"
-			m.history = append(m.history,
-				ConversationTurn{Role: "user", Content: m.lastQuery},
-				ConversationTurn{Role: "assistant", Content: cleanLLMOutput(m.output), References: m.lastPoints},
-			)
-			m.lastQuery = ""
-			m.output = ""
-			m.updateViewport()
-			if m.streamReader != nil {
-				_ = m.streamReader.Close()
-				m.streamReader = nil
+			// Check if output contains a tool call
+			if name, args, ok := ParseCall(m.output); ok {
+				m.statusMsg = fmt.Sprintf("Executing skill '%s'...", name)
+				cleanedOutput := cleanLLMOutput(m.output)
+				if cleanedOutput == "" {
+					cleanedOutput = m.output
+				}
+				m.history = append(m.history,
+					ConversationTurn{Role: "user", Content: m.lastQuery},
+					ConversationTurn{Role: "assistant", Content: cleanedOutput, References: m.lastPoints},
+				)
+				m.updateViewport()
+				cmds = append(cmds, m.executeSkillCmd(name, args))
+			} else {
+				// Stream complete
+				m.state = stateIdle
+				m.statusMsg = "Ready"
+				m.history = append(m.history,
+					ConversationTurn{Role: "user", Content: m.lastQuery},
+					ConversationTurn{Role: "assistant", Content: cleanLLMOutput(m.output), References: m.lastPoints},
+				)
+				m.lastQuery = ""
+				m.output = ""
+				m.updateViewport()
+				if m.streamReader != nil {
+					_ = m.streamReader.Close()
+					m.streamReader = nil
+				}
 			}
 		} else {
 			m.output += msg.content
 			m.updateViewport()
 			cmds = append(cmds, m.receiveStreamChunkCmd())
 		}
+
+	case skillResultMsg:
+		if msg.err != nil {
+			m.state = stateError
+			m.statusMsg = fmt.Sprintf("Skill error: %v", msg.err)
+			m.lastQuery = ""
+			m.output = ""
+			if m.streamReader != nil {
+				_ = m.streamReader.Close()
+				m.streamReader = nil
+			}
+			break
+		}
+		// Skill succeeded! Transition back to streaming to complete the answer.
+		toolResponse := fmt.Sprintf("Tool %s executed. Result:\n%s", msg.name, msg.output)
+		m.lastQuery = toolResponse
+		m.output = ""
+		m.state = stateStreaming
+		m.statusMsg = fmt.Sprintf("Generating response (resumed after '%s')...", msg.name)
+		cmds = append(cmds, m.startLLMStreamCmd())
 
 	case appErrMsg:
 		if m.stoppedByUser {

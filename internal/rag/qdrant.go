@@ -240,97 +240,7 @@ func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vecto
 	return strings.Join(texts, "\n---\n"), respBody.Result, nil
 }
 
-// SearchQdrantExact performs a TRUE full-corpus semantic search using Qdrant's
-// native brute-force mode (params.exact=true). Unlike the scroll+client-side
-// cosine approach, this lets Qdrant score every single vector server-side
-// using SIMD-optimized math and returns only the top-N results.
-//
-// This is the correct API for full-corpus recall without a cap:
-//   - Every vector in the collection is scored (no HNSW approximation).
-//   - Only the top `docs` results are returned (no 1.4M vector transfer).
-//   - Sub-second latency even for million-scale collections.
-//
-// Parameters:
-//   - docs: number of top results to return.
-//   - filterKey/filterValue: optional metadata filter pushed down to Qdrant.
-//
-// Returns: (context string, top points, error).
-func SearchQdrantExact(
-	ctx context.Context,
-	baseURL, apiKey, collection string,
-	vector []float32,
-	docs int,
-	filterKey, filterValue string,
-) (string, []QdrantPoint, error) {
-	url := fmt.Sprintf("%s/collections/%s/points/search",
-		strings.TrimSuffix(baseURL, "/"), collection)
 
-	var filter *QdrantFilter
-	if filterKey != "" && filterValue != "" {
-		filter = buildFilter(filterKey, filterValue)
-	}
-
-	reqBody := QdrantSearchRequest{
-		Vector:      vector,
-		Filter:      filter,
-		Limit:       docs,
-		WithPayload: true,
-		Params:      &QdrantSearchParams{Exact: true},
-	}
-
-	jsonData, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to marshal request body: %w", err)
-	}
-
-	log.Printf("[QdrantExact] Querying collection %s at URL %s (limit: %d, exact: true, filterKey: %q, filterValue: %q)",
-		collection, url, docs, filterKey, filterValue)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonData))
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		req.Header.Set("api-key", apiKey)
-	}
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("[QdrantExact] HTTP request failed: %v", err)
-		return "", nil, fmt.Errorf("HTTP request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	log.Printf("[QdrantExact] HTTP response: %d %s", resp.StatusCode, resp.Status)
-
-	if resp.StatusCode != http.StatusOK {
-		return "", nil, fmt.Errorf("HTTP status error: %d %s", resp.StatusCode, resp.Status)
-	}
-
-	var respBody QdrantQueryResponse
-	if err := json.NewDecoder(resp.Body).Decode(&respBody); err != nil {
-		log.Printf("[QdrantExact] Failed to decode response: %v", err)
-		return "", nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	log.Printf("[QdrantExact] Search returned %d points", len(respBody.Result))
-	for i, pt := range respBody.Result {
-		log.Printf("[QdrantExact]   point[%d] score=%f id=%v payloadKeys=%v",
-			i, pt.Score, pt.ID, getPayloadKeys(pt.Payload))
-	}
-
-	var texts []string
-	for _, pt := range respBody.Result {
-		textStr := pt.ExtractText()
-		if textStr != "" {
-			texts = append(texts, textStr)
-		}
-	}
-
-	return strings.Join(texts, "\n---\n"), respBody.Result, nil
-}
 
 func getPayloadKeys(payload map[string]interface{}) []string {
 	if payload == nil {
@@ -963,13 +873,7 @@ func GetCollectionInfo(ctx context.Context, baseURL, apiKey, collection string) 
 	return info.Result.PointsCount, info.Result.VectorsCount, info.Result.Status, nil
 }
 
-// DocumentChunk represents a single chunk with its document identity and index
-// for context expansion. Used internally by SearchWithContextExpansion.
-type DocumentChunk struct {
-	DocID      string
-	ChunkIndex int
-	Point      QdrantPoint
-}
+
 
 // docIDKeys is the ordered list of payload keys we look at to identify which
 // "document" a chunk belongs to. The first non-empty string match wins.
@@ -1399,26 +1303,7 @@ func ApplyExpansionToPrimaries(
 	return sb.String(), out
 }
 
-// SearchWithContextExpansion is the legacy 3-return wrapper around
-// SearchWithContextExpansionDetailed. It is kept for backward compatibility
-// with the existing test suite and any external caller. New code should
-// use SearchWithContextExpansionDetailed and ApplyExpansionToPrimaries
-// directly so it can preserve the ExpansionMap for post-rerank re-expansion.
-//
-// Returns: (joined context string, expanded points, error).
-func SearchWithContextExpansion(
-	ctx context.Context,
-	baseURL, apiKey, collection string,
-	vector []float32,
-	limit, expand int,
-	filterKey, filterValue string,
-) (string, []QdrantPoint, error) {
-	res, err := SearchWithContextExpansionDetailed(ctx, baseURL, apiKey, collection, vector, limit, expand, filterKey, filterValue)
-	if err != nil {
-		return "", nil, err
-	}
-	return res.Context, res.ExpandedPoints, nil
-}
+
 
 // exactSearchWithPoints is identical to SearchQdrantExact but also returns the
 // parsed []QdrantPoint slice, so the caller can use the points for expansion.

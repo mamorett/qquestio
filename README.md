@@ -167,6 +167,27 @@ Keyboard shortcuts are active global overlays and can be triggered without losin
 - **`Up` / `Down` arrow keys**: Navigate back and forward through your entered prompts history (when cursor is focused on the input prompt line).
 
 ---
+## 🔌 Skills System (Local Agentic Tools)
+
+QQuestio features a plug-and-play **Skills System** that allows the LLM to dynamically execute local actions on your machine and incorporate their results directly into the conversation.
+
+### How It Works
+
+1. **Tool Definition**: Skills implement the `Skill` interface, which defines a name, description, and an `Execute(ctx, args)` entrypoint.
+2. **LLM Prompting**: When the registry has registered skills (such as the default `bash` skill), descriptions of these tools are dynamically injected into the system prompt.
+3. **Execution Loop**:
+   - If the LLM determines it needs a tool, it outputs a command using the syntax:
+     ```text
+     CALL: <tool_name> <arguments>
+     ```
+   - The TUI detects this output, pauses LLM streaming, executes the skill asynchronously (non-blocking), formats the execution output, and feeds it back into the model's chat history.
+   - The TUI then restarts streaming, letting the LLM react to the execution results and finish its explanation.
+
+### Default Skills
+
+*   **`bash`**: Executes a bash command in a subprocess (`/bin/bash` or `/bin/sh`) on the client machine and returns combined stdout and stderr to the LLM.
+
+---
 
 ## 🏗️ Development & Building
 

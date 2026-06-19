@@ -137,3 +137,77 @@ func TestFormatReferencesDocumentTitle(t *testing.T) {
 		t.Errorf("references panel still shows 'Document: ID' fallback for at least one point; got:\n%s", out)
 	}
 }
+
+func TestComputeSearchDocs(t *testing.T) {
+	// Case 1: Reranker disabled
+	cfg := Config{DefaultCollection: "default"}
+	m := NewModel(context.Background(), cfg)
+	m.disableReranker = true
+
+	// docs = 10, expand = 0 -> 10
+	if got := m.computeSearchDocs(10, 0); got != 10 {
+		t.Errorf("Reranker disabled: expected 10, got %d", got)
+	}
+	// docs = 10, expand = 1 -> 10 * (1 + 1) = 20
+	if got := m.computeSearchDocs(10, 1); got != 20 {
+		t.Errorf("Reranker disabled with expand=1: expected 20, got %d", got)
+	}
+	// docs = 10, expand = 100 -> 500 (capped)
+	if got := m.computeSearchDocs(10, 100); got != 500 {
+		t.Errorf("Reranker disabled with expand=100 (cap): expected 500, got %d", got)
+	}
+
+	// Case 2: Reranker enabled, URL set, default rerankerPool (0 = auto)
+	cfgRerank := Config{
+		DefaultCollection: "default",
+		RerankerURL:       "http://localhost:8001",
+	}
+	mRerank := NewModel(context.Background(), cfgRerank)
+	mRerank.disableReranker = false
+	mRerank.rerankerPool = 0 // auto
+
+	// docs = 5, expand = 0 -> basePool = max(5*5, 50) = 50. expand=0 -> 50.
+	if got := mRerank.computeSearchDocs(5, 0); got != 50 {
+		t.Errorf("Reranker auto, docs=5: expected 50, got %d", got)
+	}
+	// docs = 15, expand = 0 -> basePool = max(15*5, 50) = 75. expand=0 -> 75.
+	if got := mRerank.computeSearchDocs(15, 0); got != 75 {
+		t.Errorf("Reranker auto, docs=15: expected 75, got %d", got)
+	}
+	// docs = 5, expand = 1 -> basePool = 50. expand=1 -> 50 * 2 = 100.
+	if got := mRerank.computeSearchDocs(5, 1); got != 100 {
+		t.Errorf("Reranker auto with expand=1, docs=5: expected 100, got %d", got)
+	}
+	// docs = 5, expand = 10 -> basePool = 50. expand=10 -> 50 * 11 = 550 -> 500 (capped).
+	if got := mRerank.computeSearchDocs(5, 10); got != 500 {
+		t.Errorf("Reranker auto with expand=10, docs=5: expected 500, got %d", got)
+	}
+
+	// Case 3: Reranker enabled, user-specified custom pool (rerankerPool = 30)
+	mRerankCustom := NewModel(context.Background(), cfgRerank)
+	mRerankCustom.disableReranker = false
+	mRerankCustom.rerankerPool = 30
+
+	// docs = 10, expand = 0 -> 30
+	if got := mRerankCustom.computeSearchDocs(10, 0); got != 30 {
+		t.Errorf("Reranker custom pool 30, docs=10: expected 30, got %d", got)
+	}
+	// docs = 10, expand = 1 -> 30 * 2 = 60
+	if got := mRerankCustom.computeSearchDocs(10, 1); got != 60 {
+		t.Errorf("Reranker custom pool 30, docs=10, expand=1: expected 60, got %d", got)
+	}
+
+	// Case 4: Reranker enabled, user-specified large pool (rerankerPool = 600)
+	mRerankLarge := NewModel(context.Background(), cfgRerank)
+	mRerankLarge.disableReranker = false
+	mRerankLarge.rerankerPool = 600
+
+	// docs = 10, expand = 0 -> 600
+	if got := mRerankLarge.computeSearchDocs(10, 0); got != 600 {
+		t.Errorf("Reranker custom pool 600, docs=10: expected 600, got %d", got)
+	}
+	// docs = 10, expand = 1 -> 600 * 2 = 1200 -> capped at 600 (since capVal = max(500, rerankerPool))
+	if got := mRerankLarge.computeSearchDocs(10, 1); got != 600 {
+		t.Errorf("Reranker custom pool 600, docs=10, expand=1: expected 600, got %d", got)
+	}
+}

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"os/exec"
 	"sort"
 	"strings"
 )
@@ -24,7 +27,9 @@ type SkillRegistry struct {
 }
 
 func NewSkillRegistry() SkillRegistry {
-	return SkillRegistry{skills: make(map[string]Skill)}
+	r := SkillRegistry{skills: make(map[string]Skill)}
+	r.Register(BashSkill{})
+	return r
 }
 
 func (r *SkillRegistry) Register(s Skill) {
@@ -60,6 +65,29 @@ func (r *SkillRegistry) ForPrompt() string {
 	return sb.String()
 }
 
+// ParseCall parses a tool call string of the format "CALL: <name> <args>".
+// Returns (name, args, ok).
+func ParseCall(output string) (string, string, bool) {
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "CALL:") {
+			callText := strings.TrimSpace(strings.TrimPrefix(line, "CALL:"))
+			parts := strings.Fields(callText)
+			if len(parts) > 0 {
+				name := parts[0]
+				args := ""
+				nameIdx := strings.Index(callText, name)
+				if nameIdx != -1 {
+					args = strings.TrimSpace(callText[nameIdx+len(name):])
+				}
+				return name, args, true
+			}
+		}
+	}
+	return "", "", false
+}
+
 // BashSkill executes bash commands.
 type BashSkill struct{}
 
@@ -72,6 +100,43 @@ func (BashSkill) Description() string {
 }
 
 func (BashSkill) Execute(ctx context.Context, args []byte) (string, error) {
-	// Stub implementation for now
-	return "bash execution not implemented in this phase", nil
+	var commandObj struct {
+		Command string `json:"command"`
+	}
+	var cmdStr string
+	if err := json.Unmarshal(args, &commandObj); err == nil && commandObj.Command != "" {
+		cmdStr = commandObj.Command
+	} else {
+		cmdStr = string(args)
+	}
+
+	cmdStr = strings.TrimSpace(cmdStr)
+	if cmdStr == "" {
+		return "", fmt.Errorf("empty command")
+	}
+
+	// Try /bin/bash first, then fallback to /bin/sh, then fallback to PATH lookup "bash"
+	shellPath := "/bin/bash"
+	if _, err := exec.LookPath(shellPath); err != nil {
+		shellPath = "/bin/sh"
+		if _, err := exec.LookPath(shellPath); err != nil {
+			shellPath = "bash"
+		}
+	}
+
+	cmd := exec.CommandContext(ctx, shellPath, "-c", cmdStr)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	output := stdout.String()
+	if stderr.Len() > 0 {
+		if output != "" {
+			output += "\n"
+		}
+		output += "Stderr: " + stderr.String()
+	}
+
+	return output, err
 }
