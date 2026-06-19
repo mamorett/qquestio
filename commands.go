@@ -118,7 +118,7 @@ func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 		// already approximate and the expansion would still be
 		// corpus-wide, so we just call SearchQdrant directly. We still
 		// pass the expand=0 so the message shape is uniform downstream.
-		if m.searchCap > 0 {
+		if m.searchCap > 0 && m.exactPhrase == "" {
 			candidateLimit := m.searchCap
 			if candidateLimit < searchDocs {
 				candidateLimit = searchDocs
@@ -139,7 +139,7 @@ func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 		// via /cap local. Streams every vector and scores locally on all CPU cores.
 		// Context expansion here would also be possible but it is a path only
 		// used as a fallback when Qdrant refuses params.exact=true.
-		if m.searchMode == "local" {
+		if m.searchMode == "local" || m.exactPhrase != "" {
 			forceRefresh := m.cacheForceRefresh
 			results, points, fromCache, err := rag.SearchQdrantFullCorpus(
 				m.ctx, m.cfg.QdrantURL, m.cfg.QdrantAPIKey,
@@ -149,6 +149,7 @@ func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 				m.qdrantPoints,
 				forceRefresh,
 				nil,
+				m.exactPhrase,
 			)
 			if err != nil {
 				return appErrMsg{err: err, reason: "Full-corpus local search failed", stage: "search"}
@@ -266,6 +267,7 @@ func (m *Model) warmupCacheCmd() tea.Cmd {
 			m.qdrantPoints,
 			true, // force refresh
 			nil,
+			"", // exactMatch
 		)
 		if err != nil {
 			return appErrMsg{err: err, reason: "Cache warmup failed", stage: "search"}

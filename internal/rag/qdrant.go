@@ -408,6 +408,7 @@ func SearchQdrantFullCorpus(
 	livePointCount int,
 	forceRefresh bool,
 	progress ProgressFunc,
+	exactMatch string,
 ) (string, []QdrantPoint, bool, error) {
 	// 1. Try the on-disk cache first (unless caller forced a refresh).
 	if !forceRefresh {
@@ -419,9 +420,12 @@ func SearchQdrantFullCorpus(
 			if livePointCount > 0 && cache.PointCount != livePointCount {
 				stale = true
 			}
-			if !stale {
-				// Apply the filter client-side.
+			if !stale && len(cachedPoints) > 0 {
+				// Cache hit!
 				filtered := applyFilter(cachedPoints, filterKey, filterValue)
+				if exactMatch != "" {
+					filtered = applyExactMatch(filtered, exactMatch)
+				}
 				// Compute top-N by cosine similarity.
 				top, err := topNByCosine(vector, filtered, docs, func(p, total int) {
 					if progress != nil {
@@ -463,7 +467,11 @@ func SearchQdrantFullCorpus(
 	if progress != nil {
 		progress(total, total)
 	}
-	top, err := topNByCosine(vector, points, docs, func(p, _ int) {
+	filtered := points
+	if exactMatch != "" {
+		filtered = applyExactMatch(filtered, exactMatch)
+	}
+	top, err := topNByCosine(vector, filtered, docs, func(p, _ int) {
 		if progress != nil {
 			progress(p, total)
 		}
@@ -626,6 +634,20 @@ func applyFilter(points []QdrantPoint, filterKey, filterValue string) []QdrantPo
 					out = append(out, p)
 				}
 			}
+		}
+	}
+	return out
+}
+
+func applyExactMatch(points []QdrantPoint, phrase string) []QdrantPoint {
+	if phrase == "" {
+		return points
+	}
+	phraseNorm := strings.ToLower(phrase)
+	out := make([]QdrantPoint, 0, len(points))
+	for _, p := range points {
+		if strings.Contains(strings.ToLower(p.ExtractText()), phraseNorm) {
+			out = append(out, p)
 		}
 	}
 	return out

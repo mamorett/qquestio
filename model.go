@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -83,6 +84,7 @@ type Model struct {
 
 	// --- Pipeline transient ---
 	lastQuery     string            // The user query that started the pipeline
+	exactPhrase   string            // Parsed exact phrase (if any) to bypass embedding and force string match
 	ragContext    string            // Retrieved text from Qdrant (current turn)
 	lastPoints    []rag.QdrantPoint // Retrieved points from Qdrant (current turn)
 	cancelRequest context.CancelFunc
@@ -250,6 +252,39 @@ func (m *Model) Init() tea.Cmd {
 		m.fetchQdrantInfoCmd(),
 		m.preloadCacheInfoCmd(),
 	)
+}
+
+// extractExactPhrase strips surrounding standard or smart quotes from a query.
+func extractExactPhrase(raw string) string {
+	s := strings.TrimSpace(raw)
+	quotes := []string{"\"", "“", "”", "„", "«", "»"}
+
+	hasPrefix := false
+	for _, q := range quotes {
+		if strings.HasPrefix(s, q) {
+			hasPrefix = true
+			break
+		}
+	}
+	hasSuffix := false
+	for _, q := range quotes {
+		if strings.HasSuffix(s, q) {
+			hasSuffix = true
+			break
+		}
+	}
+
+	if hasPrefix && hasSuffix {
+		for _, q := range quotes {
+			s = strings.TrimPrefix(s, q)
+			s = strings.TrimSuffix(s, q)
+		}
+		s = strings.TrimSpace(s)
+		if len(s) > 0 {
+			return s
+		}
+	}
+	return ""
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -439,7 +474,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.tempInput = ""
 
 				// Start RAG pipeline
-				m.lastQuery = raw
+				rawClean := strings.TrimSpace(raw)
+				m.lastQuery = rawClean
+				m.exactPhrase = ""
+				isQuote := (strings.HasPrefix(rawClean, "\"") && strings.HasSuffix(rawClean, "\"")) ||
+					(strings.HasPrefix(rawClean, "“") && strings.HasSuffix(rawClean, "”")) ||
+					(strings.HasPrefix(rawClean, "'") && strings.HasSuffix(rawClean, "'")) ||
+					(strings.HasPrefix(rawClean, "«") && strings.HasSuffix(rawClean, "»"))
+					
+				if isQuote {
+					runes := []rune(rawClean)
+					if len(runes) > 2 {
+						m.exactPhrase = string(runes[1 : len(runes)-1])
+						m.lastQuery = m.exactPhrase
+					}
+				}
 				m.output = ""
 				m.lastPoints = nil
 				m.ragContext = ""
@@ -447,7 +496,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = stateEmbedding
 				m.statusMsg = "Generating embedding..."
 				m.updateViewport()
-				cmds = append(cmds, m.generateEmbeddingCmd(raw))
+				cmds = append(cmds, m.generateEmbeddingCmd(rawClean))
 			}
 		}
 
@@ -460,7 +509,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case searchResultMsg:
 		m.refViewport.GotoTop()
 		m.maybeAutoCompact()
-		if m.cfg.RerankerURL != "" && !m.disableReranker {
+		if m.cfg.RerankerURL != "" && !m.disableReranker && m.exactPhrase == "" {
 			m.state = stateReranking
 			m.statusMsg = "Reranking retrieved documents..."
 			m.updateViewport()
@@ -711,6 +760,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewport, vpCmd = m.viewport.Update(msg)
 			}
 			cmds = append(cmds, vpCmd)
+		}
+	}
+
+	// Aggressive cleanup: if any terminal mouse escape sequences leaked
+	// through the regular event loop (which happens sometimes when scrolling
+	// fast or if the terminal uses a slightly different SGR sequence), strip
+	// them from the text input buffer before they render.
+	// We look for patterns like `[<65;85;14M` or `[<64;85;14m` which are SGR mouse codes.
+	leakRegex := regexp.MustCompile(`\[<\d+;\d+;\d+[mM]`)
+	if m.tempInput != "" {
+		m.tempInput = leakRegex.ReplaceAllString(m.tempInput, "")
+	}
+	if m.textInput.Value() != "" {
+		cleaned := leakRegex.ReplaceAllString(m.textInput.Value(), "")
+		if cleaned != m.textInput.Value() {
+			m.textInput.SetValue(cleaned)
+			m.textInput.SetCursor(len(cleaned))
 		}
 	}
 
