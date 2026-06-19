@@ -50,8 +50,27 @@ func newFakeQdrant(corpus []QdrantPoint) *fakeQdrant {
 func (f *fakeQdrant) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/collections/", func(w http.ResponseWriter, r *http.Request) {
-		// Route by suffix.
 		path := r.URL.Path
+		if r.Method == http.MethodGet {
+			// GET /collections/{collection}
+			resp := map[string]interface{}{
+				"result": map[string]interface{}{
+					"status":        "green",
+					"points_count":  len(f.points),
+					"vectors_count": len(f.points),
+					"payload_schema": map[string]interface{}{
+						"text": map[string]interface{}{
+							"type": "text",
+						},
+					},
+				},
+				"status": "ok",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
+			return
+		}
+		// Route by suffix.
 		if strings.HasSuffix(path, "/points/search") {
 			f.serveSearch(w, r)
 			return
@@ -130,8 +149,16 @@ func (f *fakeQdrant) serveScroll(w http.ResponseWriter, r *http.Request) {
 
 	var req ScrollRequest
 	if err := json.Unmarshal([]byte(body), &req); err != nil {
-		http.Error(w, err.Error(), 400)
-		return
+		var reqAlt exactPhraseScrollRequest
+		if errAlt := json.Unmarshal([]byte(body), &reqAlt); errAlt == nil {
+			req.Limit = reqAlt.Limit
+			req.WithPayload = reqAlt.WithPayload
+			req.WithVector = reqAlt.WithVector
+			req.Offset = reqAlt.Offset
+		} else {
+			http.Error(w, err.Error(), 400)
+			return
+		}
 	}
 
 	// Apply server-side filter.

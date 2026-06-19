@@ -18,6 +18,7 @@ import (
 
 type QdrantMatch struct {
 	Value interface{} `json:"value,omitempty"`
+	Text  string      `json:"text,omitempty"`
 }
 
 // QdrantRange represents the {"gte":..,"lte":..,"gt":..,"lt":..} object used
@@ -1571,4 +1572,290 @@ func scrollOneRange(ctx context.Context, url, apiKey string, r docRange) []Qdran
 		offset = scrollResp.Result.NextPageOffset
 	}
 	return all
+}
+
+// ExtractQuotedPhrases parses raw query and returns all substrings that are inside quote pairs.
+// Supported quote pairs:
+// - "..."
+// - '...'
+// - “...”
+// - „...” or „...“
+// - «...»
+func ExtractQuotedPhrases(raw string) []string {
+	var phrases []string
+	runes := []rune(raw)
+	n := len(runes)
+	i := 0
+	for i < n {
+		r := runes[i]
+		var closeRune rune
+		hasQuote := false
+		switch r {
+		case '"':
+			closeRune = '"'
+			hasQuote = true
+		case '\'':
+			closeRune = '\''
+			hasQuote = true
+		case '“':
+			closeRune = '”'
+			hasQuote = true
+		case '”':
+			closeRune = '”'
+			hasQuote = true
+		case '„':
+			closeRune = '”'
+			hasQuote = true
+		case '«':
+			closeRune = '»'
+			hasQuote = true
+		}
+
+		if hasQuote {
+			j := i + 1
+			found := false
+			for j < n {
+				if r == '„' && (runes[j] == '”' || runes[j] == '“') {
+					found = true
+					break
+				}
+				if runes[j] == closeRune {
+					found = true
+					break
+				}
+				j++
+			}
+			if found {
+				phrase := string(runes[i+1 : j])
+				phrases = append(phrases, phrase)
+				i = j + 1
+				continue
+			}
+		}
+		i++
+	}
+	return phrases
+}
+
+type QdrantNestedFilter struct {
+	Should []QdrantFieldCondition `json:"should,omitempty"`
+	Must   []QdrantFieldCondition `json:"must,omitempty"`
+}
+
+type QdrantComplexFilter struct {
+	Must []interface{} `json:"must"`
+}
+
+type exactPhraseScrollRequest struct {
+	Limit       int         `json:"limit"`
+	WithPayload bool        `json:"with_payload"`
+	WithVector  bool        `json:"with_vector"`
+	Offset      interface{} `json:"offset,omitempty"`
+	Filter      interface{} `json:"filter,omitempty"`
+}
+
+// GetTextIndexedFields retrieves payload schema and filters fields with 'text' index.
+func GetTextIndexedFields(ctx context.Context, baseURL, apiKey, collection string) ([]string, error) {
+	url := fmt.Sprintf("%s/collections/%s", strings.TrimSuffix(baseURL, "/"), collection)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("api-key", apiKey)
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP status: %s", resp.Status)
+	}
+
+	var raw map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+
+	result, ok := raw["result"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid response structure")
+	}
+
+	schema, ok := result["payload_schema"].(map[string]interface{})
+	if !ok {
+		return nil, nil
+	}
+
+	var fields []string
+	for field, config := range schema {
+		cfgMap, ok := config.(map[string]interface{})
+		if ok {
+			var isText bool
+			if t, ok := cfgMap["type"].(string); ok && t == "text" {
+				isText = true
+			} else if dt, ok := cfgMap["data_type"].(string); ok && dt == "text" {
+				isText = true
+			}
+			if isText {
+				fields = append(fields, field)
+			}
+		}
+	}
+	return fields, nil
+}
+
+// SearchQdrantExactPhrases queries Qdrant with server-side text filters on indexed fields,
+// then applies strict client-side case-sensitive substring matching on candidates.
+func SearchQdrantExactPhrases(
+	ctx context.Context,
+	baseURL, apiKey, collection string,
+	phrases []string,
+	docs int,
+	filterKey, filterValue string,
+) (string, []QdrantPoint, error) {
+	if len(phrases) == 0 {
+		return "", nil, nil
+	}
+
+	// 1. Fetch indexed text fields.
+	textFields, err := GetTextIndexedFields(ctx, baseURL, apiKey, collection)
+	if err != nil || len(textFields) == 0 {
+		textFields = []string{"text", "content", "document", "page_content"}
+	}
+
+	// 2. Build filter conditions for matching the first phrase.
+	primaryPhrase := phrases[0]
+	var shouldConds []QdrantFieldCondition
+	for _, field := range textFields {
+		shouldConds = append(shouldConds, QdrantFieldCondition{
+			Key:   field,
+			Match: QdrantMatch{Text: primaryPhrase},
+		})
+	}
+
+	// Combined filter with metadata if present.
+	var filter interface{}
+	if filterKey != "" && filterValue != "" {
+		metaFilter := buildFilter(filterKey, filterValue)
+		var must []interface{}
+		must = append(must, QdrantNestedFilter{Should: shouldConds})
+		if metaFilter != nil {
+			for _, c := range metaFilter.Must {
+				must = append(must, c)
+			}
+			if len(metaFilter.Should) > 0 {
+				must = append(must, QdrantNestedFilter{Should: metaFilter.Should})
+			}
+		}
+		filter = QdrantComplexFilter{Must: must}
+	} else {
+		filter = QdrantNestedFilter{Should: shouldConds}
+	}
+
+	// 3. Query Qdrant scroll endpoint using the filter (WithVector: false).
+	points, err := scrollWithFilter(ctx, baseURL, apiKey, collection, filter)
+	if err != nil {
+		return "", nil, fmt.Errorf("scroll failed: %w", err)
+	}
+
+	// 4. Strict client-side scan for all phrases (case-sensitive).
+	var matched []QdrantPoint
+	for _, p := range points {
+		text := p.ExtractText()
+		match := true
+		for _, ph := range phrases {
+			if !strings.Contains(text, ph) {
+				match = false
+				break
+			}
+		}
+		if match {
+			matched = append(matched, p)
+		}
+	}
+
+	// 5. Limit final results to requested count.
+	top := matched
+	if docs > 0 && len(top) > docs {
+		top = top[:docs]
+	}
+	for i := range top {
+		top[i].IsPrimary = true
+	}
+	texts := extractTexts(top)
+	return strings.Join(texts, "\n---\n"), top, nil
+}
+
+func scrollWithFilter(
+	ctx context.Context,
+	baseURL, apiKey, collection string,
+	filter interface{},
+) ([]QdrantPoint, error) {
+	url := fmt.Sprintf("%s/collections/%s/points/scroll", strings.TrimSuffix(baseURL, "/"), collection)
+
+	const batchSize = 100
+	var all []QdrantPoint
+	var offset interface{}
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		reqBody := exactPhraseScrollRequest{
+			Limit:       batchSize,
+			WithPayload: true,
+			WithVector:  false, // Disable vector fetching!
+			Offset:      offset,
+			Filter:      filter,
+		}
+		jsonData, err := json.Marshal(reqBody)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal scroll request: %w", err)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonData))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create scroll request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			req.Header.Set("api-key", apiKey)
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("scroll HTTP request failed: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body := make([]byte, 512)
+			n, _ := resp.Body.Read(body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("scroll HTTP status error: %d %s (body: %s)",
+				resp.StatusCode, resp.Status, string(body[:n]))
+		}
+
+		var scrollResp ScrollResponse
+		if err := json.NewDecoder(resp.Body).Decode(&scrollResp); err != nil {
+			resp.Body.Close()
+			return nil, fmt.Errorf("failed to decode scroll response: %w", err)
+		}
+		resp.Body.Close()
+
+		all = append(all, scrollResp.Result.Points...)
+
+		if scrollResp.Result.NextPageOffset == nil {
+			break
+		}
+		offset = scrollResp.Result.NextPageOffset
+	}
+	return all, nil
 }

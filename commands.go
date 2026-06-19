@@ -112,6 +112,18 @@ func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 		docs := m.searchLimit
 		expand := m.searchExpand
 		searchDocs := m.computeSearchDocs(docs, expand)
+		if len(m.exactPhrases) > 0 {
+			results, points, err := rag.SearchQdrantExactPhrases(
+				m.ctx, m.cfg.QdrantURL, m.cfg.QdrantAPIKey,
+				m.collection, m.exactPhrases,
+				searchDocs,
+				m.filterKey, m.filterValue,
+			)
+			if err != nil {
+				return appErrMsg{err: err, reason: "Exact phrase search failed", stage: "search"}
+			}
+			return searchResultMsg{context: results, points: points, primaryPoints: points, expansionMap: rag.ExpansionMap{}, expand: 0}
+		}
 
 		// HNSW path: user explicitly opted into a cap (approximate, bounded).
 		// We bypass context expansion here because HNSW results are

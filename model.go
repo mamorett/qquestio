@@ -85,6 +85,7 @@ type Model struct {
 	// --- Pipeline transient ---
 	lastQuery     string            // The user query that started the pipeline
 	exactPhrase   string            // Parsed exact phrase (if any) to bypass embedding and force string match
+	exactPhrases  []string          // Parsed exact phrases (if any) to bypass embedding and force string match
 	ragContext    string            // Retrieved text from Qdrant (current turn)
 	lastPoints    []rag.QdrantPoint // Retrieved points from Qdrant (current turn)
 	cancelRequest context.CancelFunc
@@ -476,27 +477,29 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Start RAG pipeline
 				rawClean := strings.TrimSpace(raw)
 				m.lastQuery = rawClean
-				m.exactPhrase = ""
-				isQuote := (strings.HasPrefix(rawClean, "\"") && strings.HasSuffix(rawClean, "\"")) ||
-					(strings.HasPrefix(rawClean, "“") && strings.HasSuffix(rawClean, "”")) ||
-					(strings.HasPrefix(rawClean, "'") && strings.HasSuffix(rawClean, "'")) ||
-					(strings.HasPrefix(rawClean, "«") && strings.HasSuffix(rawClean, "»"))
-					
-				if isQuote {
-					runes := []rune(rawClean)
-					if len(runes) > 2 {
-						m.exactPhrase = string(runes[1 : len(runes)-1])
-						m.lastQuery = m.exactPhrase
-					}
+				m.exactPhrases = rag.ExtractQuotedPhrases(rawClean)
+				if len(m.exactPhrases) > 0 {
+					m.exactPhrase = m.exactPhrases[0]
+					m.output = ""
+					m.lastPoints = nil
+					m.ragContext = ""
+					m.selectRandomLoadingMessage()
+					m.state = stateSearching
+					m.statusMsg = "Searching exact string..."
+					m.updateViewport()
+					cmds = append(cmds, m.searchQdrantCmd(nil))
+				} else {
+					m.exactPhrase = ""
+					m.exactPhrases = nil
+					m.output = ""
+					m.lastPoints = nil
+					m.ragContext = ""
+					m.selectRandomLoadingMessage()
+					m.state = stateEmbedding
+					m.statusMsg = "Generating embedding..."
+					m.updateViewport()
+					cmds = append(cmds, m.generateEmbeddingCmd(rawClean))
 				}
-				m.output = ""
-				m.lastPoints = nil
-				m.ragContext = ""
-				m.selectRandomLoadingMessage()
-				m.state = stateEmbedding
-				m.statusMsg = "Generating embedding..."
-				m.updateViewport()
-				cmds = append(cmds, m.generateEmbeddingCmd(rawClean))
 			}
 		}
 
