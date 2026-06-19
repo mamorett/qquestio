@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -22,25 +23,126 @@ func (m *Model) generateEmbeddingCmd(query string) tea.Cmd {
 	}
 }
 
-// searchQdrantCmd (Stage 2) performs similarity search against Qdrant collection.
+// searchQdrantCmd (Stage 2) performs similarity search against Qdrant collection
+// with query-time context expansion.
+//
+// The active path is chosen automatically based on m.searchCap and m.searchMode:
+//
+//   - Cap set (m.searchCap > 0): use Qdrant's HNSW query API with the cap as
+//     the candidate pool size. Fast, but bounded by the cap (approximate recall).
+//
+//   - No cap, mode "local" (opt-in via /cap local): use SearchQdrantFullCorpus,
+//     which streams every vector via /points/scroll and computes cosine
+//     similarity on the client using all local CPU cores. Slower (network-bound),
+//     but works when Qdrant refuses params.exact=true.
+//
+//   - No cap, default: use SearchWithContextExpansion, which calls
+//     SearchQdrantExact (params.exact=true) for the primary top-N matches and
+//     then fetches ±m.searchExpand adjacent chunks from the same document
+//     via batched parallel scroll requests. This solves the "fragmented
+//     context" problem: a single top match is a fragment; with expansion
+//     the LLM sees the complete surrounding slice of the source document.
+//
+// The user-requested `docs` (m.searchLimit) is the final primary return count.
+// Expansion is governed by m.searchExpand (0 = disabled, 1 = ±1 neighbor, etc).
 func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 	return func() tea.Msg {
-		limit := m.searchLimit
+		docs := m.searchLimit
+		expand := m.searchExpand
+		if expand < 0 {
+			expand = 0
+		}
+
+		// Compute the size of the primary candidate pool. With reranker enabled
+		// we use a fixed 50. Without reranker, we ALSO scale the pool by expand
+		// so the vector similarity computation "considers many more chunks" as
+		// the user explicitly requested (the expand>0 path must widen recall).
+		searchDocs := docs
 		if m.cfg.RerankerURL != "" && !m.disableReranker {
-			limit = m.searchLimit * 3
-			if limit < 20 {
-				limit = 20
+			searchDocs = 50
+		} else if expand >= 2 {
+			// Bug 1 fix: scale the primary candidate pool with expand.
+			// limit=10, expand=10 → searchDocs=100; limit=10, expand=20 → 200.
+			// Capped at 500 to avoid blowing up the LLM context window.
+			searchDocs = docs * expand
+			if searchDocs > 500 {
+				searchDocs = 500
 			}
 		}
-		results, points, err := rag.SearchQdrant(
+		if searchDocs < docs {
+			searchDocs = docs
+		}
+
+		// HNSW path: user explicitly opted into a cap (approximate, bounded).
+		// We bypass context expansion here because HNSW results are
+		// already approximate and the expansion would still be
+		// corpus-wide, so we just call SearchQdrant directly. We still
+		// pass the expand=0 so the message shape is uniform downstream.
+		if m.searchCap > 0 {
+			candidateLimit := m.searchCap
+			if candidateLimit < searchDocs {
+				candidateLimit = searchDocs
+			}
+			results, points, err := rag.SearchQdrant(
+				m.ctx, m.cfg.QdrantURL, m.cfg.QdrantAPIKey,
+				m.collection, vector,
+				candidateLimit, searchDocs,
+				m.filterKey, m.filterValue,
+			)
+			if err != nil {
+				return appErrMsg{err: err, reason: "Qdrant search failed", stage: "search"}
+			}
+			return searchResultMsg{context: results, points: points, primaryPoints: points, expansionMap: rag.ExpansionMap{}, expand: 0}
+		}
+
+		// Local-fallback path: user explicitly requested client-side brute force
+		// via /cap local. Streams every vector and scores locally on all CPU cores.
+		// Context expansion here would also be possible but it is a path only
+		// used as a fallback when Qdrant refuses params.exact=true.
+		if m.searchMode == "local" {
+			forceRefresh := m.cacheForceRefresh
+			results, points, fromCache, err := rag.SearchQdrantFullCorpus(
+				m.ctx, m.cfg.QdrantURL, m.cfg.QdrantAPIKey,
+				m.collection, vector,
+				searchDocs,
+				m.filterKey, m.filterValue,
+				m.qdrantPoints,
+				forceRefresh,
+				nil,
+			)
+			if err != nil {
+				return appErrMsg{err: err, reason: "Full-corpus local search failed", stage: "search"}
+			}
+			m.cacheForceRefresh = false
+			if fromCache {
+				if cache, _, cerr := rag.LoadCorpusCache(m.collection); cerr == nil && cache != nil {
+					age := time.Since(cache.CachedAt).Truncate(time.Second)
+					m.cacheInfo = fmt.Sprintf("✓ %s pts (%s old)", formatNumber(cache.PointCount), age)
+				}
+			}
+			return searchResultMsg{context: results, points: points, primaryPoints: points, expansionMap: rag.ExpansionMap{}, expand: 0}
+		}
+
+		// DEFAULT no-cap path: full-corpus exact search + context expansion.
+		// We use the detailed version so the rerank step can rerank only
+		// the primary top-N (not the already-expanded set) and re-apply
+		// ±expand around the reranked top-K.
+		res, err := rag.SearchWithContextExpansionDetailed(
 			m.ctx, m.cfg.QdrantURL, m.cfg.QdrantAPIKey,
-			m.collection, vector, limit,
+			m.collection, vector,
+			searchDocs, expand,
 			m.filterKey, m.filterValue,
 		)
 		if err != nil {
-			return appErrMsg{err: err, reason: "Qdrant search failed", stage: "search"}
+			return appErrMsg{err: err, reason: "Qdrant context-expanded search failed", stage: "search"}
 		}
-		return searchResultMsg{context: results, points: points}
+		return searchResultMsg{
+			context:       res.Context,
+			points:        res.ExpandedPoints,
+			primaryPoints: res.PrimaryPoints,
+			expansionMap:  res.ExpansionMap,
+			expand:        expand,
+		}
 	}
 }
 
@@ -56,6 +158,20 @@ func (m *Model) fetchQdrantInfoCmd() tea.Cmd {
 			status:       status,
 			err:          err,
 		}
+	}
+}
+
+// preloadCacheInfoCmd checks for an existing on-disk cache at startup and
+// updates the header bar so the user knows whether the cache is warm.
+func (m *Model) preloadCacheInfoCmd() tea.Cmd {
+	return func() tea.Msg {
+		cache, _, err := rag.LoadCorpusCache(m.collection)
+		if err != nil || cache == nil {
+			return cachePreloadMsg{found: false}
+		}
+		age := time.Since(cache.CachedAt).Truncate(time.Second)
+		info := fmt.Sprintf("✓ %s pts (%s old)", formatNumber(cache.PointCount), age)
+		return cachePreloadMsg{found: true, info: info, pointCount: cache.PointCount}
 	}
 }
 
@@ -91,16 +207,72 @@ func (m *Model) receiveStreamChunkCmd() tea.Cmd {
 	}
 }
 
-// rerankPointsCmd (Optional Stage 2.5) reranks the retrieved Qdrant points using a generic reranker.
-func (m *Model) rerankPointsCmd(points []rag.QdrantPoint) tea.Cmd {
+// warmupCacheCmd scrolls the entire Qdrant collection and persists it to the
+// on-disk cache. This is triggered by `/cache warmup` so subsequent offline
+// queries can be served from cache. On completion it transitions back to idle.
+func (m *Model) warmupCacheCmd() tea.Cmd {
 	return func() tea.Msg {
-		if len(points) == 0 {
+		// Use a zero-vector to satisfy the function signature; we don't
+		// actually need a query for cache warmup. We just scroll + save.
+		dummyVector := make([]float32, 0)
+
+		// We need the embedding dimension from the collection to build
+		// a proper dummy vector. Fetch one point to discover it.
+		_, _, _, err := rag.SearchQdrantFullCorpus(
+			m.ctx, m.cfg.QdrantURL, m.cfg.QdrantAPIKey,
+			m.collection, dummyVector,
+			1,
+			"", "",
+			m.qdrantPoints,
+			true, // force refresh
+			nil,
+		)
+		if err != nil {
+			return appErrMsg{err: err, reason: "Cache warmup failed", stage: "search"}
+		}
+
+		// Read back the cache to update the header info.
+		if cache, _, cerr := rag.LoadCorpusCache(m.collection); cerr == nil && cache != nil {
+			age := time.Since(cache.CachedAt).Truncate(time.Second)
+			m.cacheInfo = fmt.Sprintf("✓ %s pts (%s old)", formatNumber(cache.PointCount), age)
+		}
+
+		return systemLogMsg{
+			content:  fmt.Sprintf("Cache warmup complete for collection '%s'", m.collection),
+			feedback: fmt.Sprintf("Cache warmed for %s", m.collection),
+		}
+	}
+}
+
+// rerankPointsCmd (Optional Stage 2.5) reranks the retrieved Qdrant points
+// using a generic reranker. Critically, it now:
+//
+//  1. Reranks only the PRIMARY top-N matches (not the already-expanded set),
+//     so the reranker's score reflects pure relevance, not the artificially
+//     inflated rank of duplicate adjacent chunks.
+//  2. After reranking, takes the top-`searchLimit` reranked primaries and
+//     re-applies ±expand around them using the cached ExpansionMap. This
+//     makes /expand actually work in the rerank path: the LLM sees the
+//     full document slice around the reranked matches, not just fragments.
+//
+// Takes the full searchResultMsg (instead of just points) so it has access
+// to primaryPoints, expansionMap, and expand.
+func (m *Model) rerankPointsCmd(result searchResultMsg) tea.Cmd {
+	return func() tea.Msg {
+		// Use primary points for reranking; if empty (e.g. HNSW/local paths
+		// that don't separate primary from expanded), fall back to the full
+		// points slice.
+		primaries := result.primaryPoints
+		if len(primaries) == 0 {
+			primaries = result.points
+		}
+		if len(primaries) == 0 {
 			return rerankResultMsg{context: "", points: nil}
 		}
 
-		// Extract texts for reranking
+		// Extract texts for reranking (only the primaries).
 		var texts []string
-		for _, pt := range points {
+		for _, pt := range primaries {
 			texts = append(texts, pt.ExtractText())
 		}
 
@@ -116,49 +288,64 @@ func (m *Model) rerankPointsCmd(points []rag.QdrantPoint) tea.Cmd {
 			return appErrMsg{err: err, reason: fmt.Sprintf("Reranker query failed: %v", err), stage: "rerank"}
 		}
 
-		// Map scores back to the original QdrantPoint slice and sort them
+		// Map rerank scores back to the primaries slice.
 		scoreMap := make(map[int]float64)
 		for _, item := range rerankItems {
 			scoreMap[item.Index] = item.Score
 		}
 
-		// Sort the points based on their rerank score descending
+		// Sort the primaries by rerank score descending.
 		type scoredPoint struct {
 			point rag.QdrantPoint
 			score float64
 		}
 		var scoredPoints []scoredPoint
-		for i, pt := range points {
+		for i, pt := range primaries {
 			score, ok := scoreMap[i]
 			if !ok {
 				score = -999.0
 			}
-			// Update the score displayed in UI
 			pt.Score = float32(score)
 			scoredPoints = append(scoredPoints, scoredPoint{point: pt, score: score})
 		}
-
-		// Sort by score desc
 		sort.SliceStable(scoredPoints, func(i, j int) bool {
 			return scoredPoints[i].score > scoredPoints[j].score
 		})
 
-		// Slice to the original searchLimit
-		var finalPoints []rag.QdrantPoint
+		// Slice to the user-requested top-K.
+		var rerankedTopK []rag.QdrantPoint
 		limit := m.searchLimit
 		if limit > len(scoredPoints) {
 			limit = len(scoredPoints)
 		}
 		for i := 0; i < limit; i++ {
-			finalPoints = append(finalPoints, scoredPoints[i].point)
+			rerankedTopK = append(rerankedTopK, scoredPoints[i].point)
 		}
 
-		// Rebuild the RAG context string using only finalPoints
-		var finalTexts []string
-		for _, pt := range finalPoints {
-			finalTexts = append(finalTexts, pt.ExtractText())
+		// Re-apply ±expand around the reranked top-K using the cached map.
+		// This is the key fix for the "expand does nothing" bug in the
+		// rerank path: instead of throwing away the expansion (as the old
+		// code did by re-extracting text from `finalPoints`), we expand
+		// the reranked primaries with the chunks we already pulled from
+		// Qdrant during the original search. Pure CPU, no extra network.
+		finalContext, finalPoints := rag.ApplyExpansionToPrimaries(
+			rerankedTopK,
+			result.expansionMap,
+			result.expand,
+		)
+		if finalPoints == nil {
+			// Fallback: reranked top-K without expansion (shouldn't happen
+			// in practice, but be defensive).
+			finalPoints = rerankedTopK
+			var sb strings.Builder
+			for _, pt := range finalPoints {
+				if t := pt.ExtractText(); t != "" {
+					sb.WriteString(t)
+					sb.WriteString("\n---\n")
+				}
+			}
+			finalContext = sb.String()
 		}
-		finalContext := strings.Join(finalTexts, "\n---\n")
 
 		return rerankResultMsg{context: finalContext, points: finalPoints}
 	}

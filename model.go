@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/atotto/clipboard"
@@ -20,22 +21,22 @@ import (
 type appState int
 
 const (
-	stateIdle appState = iota // Waiting for user input
-	stateEmbedding            // Generating embedding vector
-	stateSearching            // Querying Qdrant
-	stateReranking            // Reranking retrieved documents
-	stateStreaming            // Receiving LLM SSE chunks
-	stateError                // Displaying error, input still active
+	stateIdle      appState = iota // Waiting for user input
+	stateEmbedding                 // Generating embedding vector
+	stateSearching                 // Querying Qdrant
+	stateReranking                 // Reranking retrieved documents
+	stateStreaming                 // Receiving LLM SSE chunks
+	stateError                     // Displaying error, input still active
 )
 
 type ConversationTurn struct {
-	Role                    string             // "user" | "assistant" | "system"
-	Content                 string             // The text content
-	References              []rag.QdrantPoint  // Retrieved context points (only for assistant responses)
-	RenderedContent         string             // Cached rendered markdown
-	RenderedWidth           int                // The width at which it was rendered
-	RenderedReferences      string             // Cached rendered references block
-	RenderedReferencesWidth int                // The width at which references were rendered
+	Role                    string            // "user" | "assistant" | "system"
+	Content                 string            // The text content
+	References              []rag.QdrantPoint // Retrieved context points (only for assistant responses)
+	RenderedContent         string            // Cached rendered markdown
+	RenderedWidth           int               // The width at which it was rendered
+	RenderedReferences      string            // Cached rendered references block
+	RenderedReferencesWidth int               // The width at which references were rendered
 }
 
 type Model struct {
@@ -43,13 +44,18 @@ type Model struct {
 	cfg Config
 
 	// --- Runtime state (mutable via slash commands) ---
-	collection   string // Active Qdrant collection (init: cfg.DefaultCollection)
-	searchLimit  int    // Number of Qdrant results (default: 5)
-	systemPrompt string // Custom system prompt (default: built-in RAG prompt)
-	ragMode         string // RAG mode: "strict" or "hybrid"
-	filterKey       string // Active filter metadata key
-	filterValue     string // Active filter metadata value
-	disableReranker bool   // Toggle to bypass reranker step
+	collection        string // Active Qdrant collection (init: cfg.DefaultCollection)
+	searchLimit       int    // Number of Qdrant results (default: 5)
+	searchCap         int    // Hard upper bound on candidate pool for Qdrant search (0 = no cap, search full corpus)
+	searchExpand      int    // ±N adjacent chunks to expand each top match from the same document (0 = disabled, 1 = default)
+	searchMode        string // "auto" (default), "exact" (force server-side), or "local" (client-side brute-force using all CPU cores)
+	systemPrompt      string // Custom system prompt (default: built-in RAG prompt)
+	ragMode           string // RAG mode: "strict" or "hybrid"
+	filterKey         string // Active filter metadata key
+	filterValue       string // Active filter metadata value
+	disableReranker   bool   // Toggle to bypass reranker step
+	cacheForceRefresh bool   // When true, the next full-corpus search re-scrolls Qdrant (set by /cache refresh, auto-cleared after one use)
+	cacheInfo         string // Last known cache summary for header display (e.g. "✓ 1.2M pts, 2m ago")
 
 	// --- FSM ---
 	state appState
@@ -66,13 +72,13 @@ type Model struct {
 	showRawSource bool               // Toggle between glamour-rendered markdown and raw markdown source
 
 	// --- Pipeline transient ---
-	lastQuery     string             // The user query that started the pipeline
-	ragContext    string             // Retrieved text from Qdrant (current turn)
-	lastPoints    []rag.QdrantPoint  // Retrieved points from Qdrant (current turn)
+	lastQuery     string            // The user query that started the pipeline
+	ragContext    string            // Retrieved text from Qdrant (current turn)
+	lastPoints    []rag.QdrantPoint // Retrieved points from Qdrant (current turn)
 	cancelRequest context.CancelFunc
 	streamReader  *rag.SSEReader
-	escCount      int                // consecutive Esc presses
-	stoppedByUser bool               // explicit user abort flag
+	escCount      int  // consecutive Esc presses
+	stoppedByUser bool // explicit user abort flag
 
 	// --- Qdrant Collection Stats ---
 	qdrantPoints  int
@@ -112,19 +118,22 @@ func NewModel(ctx context.Context, cfg Config) *Model {
 	vp.Style = lipgloss.NewStyle().Background(nord0).Foreground(nord4)
 
 	return &Model{
-		cfg:          cfg,
-		collection:   cfg.DefaultCollection,
-		searchLimit:  10,
-		state:        stateIdle,
-		textInput:    ti,
-		viewport:     vp,
-		spinner:      s,
-		statusMsg:    "Ready",
-		skills:       NewSkillRegistry(),
-		ctx:          ctx,
-		ragMode:      "strict",
-		filterKey:    "",
-		filterValue:  "",
+		cfg:             cfg,
+		collection:      cfg.DefaultCollection,
+		searchLimit:     10,
+		searchCap:       cfg.SearchCap,
+		searchExpand:    1, // ±1 adjacent chunk from the same document by default
+		searchMode:      "auto",
+		state:           stateIdle,
+		textInput:       ti,
+		viewport:        vp,
+		spinner:         s,
+		statusMsg:       "Ready",
+		skills:          NewSkillRegistry(),
+		ctx:             ctx,
+		ragMode:         "strict",
+		filterKey:       "",
+		filterValue:     "",
 		disableReranker: false,
 	}
 }
@@ -134,6 +143,7 @@ func (m *Model) Init() tea.Cmd {
 		textinput.Blink,
 		m.spinner.Tick,
 		m.fetchQdrantInfoCmd(),
+		m.preloadCacheInfoCmd(),
 	)
 }
 
@@ -260,7 +270,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.state = stateReranking
 			m.statusMsg = "Reranking retrieved documents..."
 			m.updateViewport()
-			cmds = append(cmds, m.rerankPointsCmd(msg.points))
+			cmds = append(cmds, m.rerankPointsCmd(msg))
 		} else {
 			m.ragContext = msg.context
 			m.lastPoints = msg.points
@@ -347,6 +357,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.state == stateEmbedding || m.state == stateSearching || m.state == stateReranking || m.state == stateStreaming {
 			m.updateViewport()
 		}
+
+	case searchProgressMsg:
+		// Transient status update from the full-corpus search loop.
+		// Just refresh the header; do not touch FSM state or history.
+		m.statusMsg = msg.status
+		m.updateViewport()
+
+	case cachePreloadMsg:
+		if msg.found {
+			m.cacheInfo = msg.info
+		}
+
+	case warmupCacheMsg:
+		// Triggered by /cache warmup. Run the scroll-based cache population
+		// in a background command. The FSM stays in stateSearching so the
+		// user sees progress and can Esc-Esc out.
+		m.state = stateSearching
+		m.statusMsg = "Warming up cache (streaming corpus from Qdrant)..."
+		m.updateViewport()
+		cmds = append(cmds, m.warmupCacheCmd())
 
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -478,12 +508,35 @@ func (m *Model) renderHeader() string {
 
 	modeView := lipgloss.NewStyle().Foreground(modeColor).Bold(true).Render(m.ragMode)
 
-	qdrantInfo := fmt.Sprintf(" %s %s  %s  %s %s  %s %s %d  %s  %s %s%s",
+	// Cap display: "none" when unset (0) for full-corpus search, otherwise the integer value
+	capText := "none"
+	if m.searchCap > 0 {
+		capText = fmt.Sprintf("%d", m.searchCap)
+	}
+
+	cacheText := "—"
+	if m.cacheInfo != "" {
+		cacheText = m.cacheInfo
+	}
+
+	// Expand display: "off" when 0 (legacy top-N only), otherwise "±N"
+	expandText := "off"
+	if m.searchExpand > 0 {
+		expandText = fmt.Sprintf("±%d", m.searchExpand)
+	}
+
+	qdrantInfo := fmt.Sprintf(" %s %s  %s  %s %s  %s %s %d  %s  %s %s  %s  %s %s  %s  %s %s  %s  %s %s%s",
 		labelStyle.Render("DB:"), valueStyle.Render(m.cfg.QdrantURL),
 		delimStyle.Render("│"),
 		labelStyle.Render("Col:"), valueStyle.Render(m.collection),
 		delimStyle.Render("│"),
 		labelStyle.Render("Limit:"), m.searchLimit,
+		delimStyle.Render("│"),
+		labelStyle.Render("Expand:"), valueStyle.Render(expandText),
+		delimStyle.Render("│"),
+		labelStyle.Render("Cap:"), valueStyle.Render(capText),
+		delimStyle.Render("│"),
+		labelStyle.Render("Cache:"), valueStyle.Render(cacheText),
 		delimStyle.Render("│"),
 		labelStyle.Render("Mode:"), modeView,
 		statsStr,
@@ -604,7 +657,7 @@ func (m *Model) updateViewport() {
 			// Add a horizontal rule separating turns
 			sb.WriteString(lipgloss.NewStyle().Foreground(nord3).Render(strings.Repeat("─", m.width-4)) + "\n\n")
 		} else if turn.Role == "system" {
-			sb.WriteString(lipgloss.NewStyle().Foreground(nord13).Italic(true).Render("ℹ " + turn.Content) + "\n\n")
+			sb.WriteString(lipgloss.NewStyle().Foreground(nord13).Italic(true).Render("ℹ "+turn.Content) + "\n\n")
 			sb.WriteString(lipgloss.NewStyle().Foreground(nord3).Render(strings.Repeat("─", m.width-4)) + "\n\n")
 		}
 	}
@@ -861,62 +914,197 @@ func (m *Model) saveAllConversationCmd(filename string) tea.Cmd {
 	}
 }
 
-// formatReferences renders retrieved Qdrant points as structured references with scores and text previews.
+// formatReferences renders retrieved Qdrant points as structured references grouped
+// by document. After query-time context expansion, points are already in document
+// order with adjacent chunks present, so we group by file_name (or the canonical
+// document field) and emit one labeled block per source document:
+//
+//	--- Document A · chunks 4-6 of 18 · score 0.94 ---
+//	...text...
+//	--- Document B · chunks 1-3 of 12 · score 0.87 ---
+//	...text...
+//
+// If the payload lacks any recognizable document identifier we fall back to the
+// flat per-point rendering so the panel never breaks.
 func formatReferences(points []rag.QdrantPoint, width int) string {
 	if len(points) == 0 {
 		return ""
 	}
+
+	// Group points by document identifier. We delegate to the same recursive
+	// extractDocumentName helper that buildPromptMessages uses, so the
+	// reference panel and the LLM prompt see the SAME document titles —
+	// this is the fix for the "lost doc title" regression.
+	groups := make([][]rag.QdrantPoint, 0)
+	groupKeys := make([]string, 0)
+	keyToIdx := make(map[string]int)
+	noDocIdx := -1
+
+	for _, pt := range points {
+		key := extractDocumentName(pt.Payload)
+		if key == "" {
+			if noDocIdx < 0 {
+				noDocIdx = len(groups)
+				groups = append(groups, nil)
+				groupKeys = append(groupKeys, "")
+			}
+			groups[noDocIdx] = append(groups[noDocIdx], pt)
+			continue
+		}
+		if idx, ok := keyToIdx[key]; ok {
+			groups[idx] = append(groups[idx], pt)
+			continue
+		}
+		keyToIdx[key] = len(groups)
+		groups = append(groups, []rag.QdrantPoint{pt})
+		groupKeys = append(groupKeys, key)
+	}
+
 	var sb strings.Builder
 	titleStyle := lipgloss.NewStyle().Foreground(nord9).Bold(true)
 	metaStyle := lipgloss.NewStyle().Foreground(nord4)
 	idStyle := lipgloss.NewStyle().Foreground(nord7)
 	scoreStyle := lipgloss.NewStyle().Foreground(nord14)
 	borderStyle := lipgloss.NewStyle().Foreground(nord3)
+	chunkStyle := lipgloss.NewStyle().Foreground(nord7).Italic(true)
 
 	sb.WriteString(titleStyle.Render("📚 References / Retrieved Context Chunks:") + "\n")
-	for i, pt := range points {
-		pointIDStr := fmt.Sprintf("%v", pt.ID)
-		textStr := pt.ExtractText()
 
-		source := extractDocumentName(pt.Payload)
-
-		var docIdentifier string
-		if source != "" {
-			docIdentifier = fmt.Sprintf("Document: %s", source)
-		} else {
-			docIdentifier = fmt.Sprintf("Document: ID %s", pointIDStr)
-		}
-
-		idMetaStr := ""
-		if source != "" {
-			idMetaStr = fmt.Sprintf(" | ID: %s", pointIDStr)
-		}
-
-		sb.WriteString(fmt.Sprintf("  %s %s (Score: %s%s)\n",
-			idStyle.Render(fmt.Sprintf("[%d]", i+1)),
-			metaStyle.Render(docIdentifier),
-			scoreStyle.Render(fmt.Sprintf("%.4f", pt.Score)),
-			metaStyle.Render(idMetaStr),
-		))
-
-		if textStr != "" {
-			wrapWidth := width - 6
-			if wrapWidth < 20 {
-				wrapWidth = 20
-			}
-			textStyle := lipgloss.NewStyle().Width(wrapWidth)
-			wrapped := textStyle.Render(strings.TrimSpace(textStr))
-			lines := strings.Split(wrapped, "\n")
-			for _, line := range lines {
-				sb.WriteString("      " + line + "\n")
-			}
-		} else {
+	// Helper: pretty-print a chunk's text preview.
+	emitChunkText := func(text string) {
+		if text == "" {
 			sb.WriteString(lipgloss.NewStyle().Foreground(nord11).Italic(true).Render("      (No text payload content found in this point)") + "\n")
+			return
 		}
-		if i < len(points)-1 {
-			sb.WriteString(borderStyle.Render("    " + strings.Repeat("┄", width-8)) + "\n")
+		wrapWidth := width - 8
+		if wrapWidth < 20 {
+			wrapWidth = 20
+		}
+		textStyle := lipgloss.NewStyle().Width(wrapWidth)
+		wrapped := textStyle.Render(strings.TrimSpace(text))
+		lines := strings.Split(wrapped, "\n")
+		for _, line := range lines {
+			sb.WriteString("      " + line + "\n")
 		}
 	}
+
+	// Helper: extract the chunk_index for a point (or -1 if missing).
+	extractIdx := func(p rag.QdrantPoint) int {
+		if p.Payload == nil {
+			return -1
+		}
+		for _, k := range []string{"chunk_index", "chunkIndex", "position", "seq", "index", "ord"} {
+			if v, ok := p.Payload[k]; ok {
+				switch n := v.(type) {
+				case float64:
+					return int(n)
+				case int:
+					return n
+				case int64:
+					return int(n)
+				case string:
+					var i int
+					if _, err := fmt.Sscanf(n, "%d", &i); err == nil {
+						return i
+					}
+				}
+			}
+		}
+		return -1
+	}
+
+	// Emit each group as a labeled document block.
+	for gi, pts := range groups {
+		if len(pts) == 0 {
+			continue
+		}
+		// Sort by chunk_index ascending so adjacent chunks read top-to-bottom.
+		sort.SliceStable(pts, func(i, j int) bool {
+			li, lj := extractIdx(pts[i]), extractIdx(pts[j])
+			if li < 0 && lj < 0 {
+				return false
+			}
+			if li < 0 {
+				return false
+			}
+			if lj < 0 {
+				return true
+			}
+			return li < lj
+		})
+
+		docName := groupKeys[gi]
+		if docName == "" {
+			// Fallback for points without a recognizable doc id: emit per-point
+			// as before so the user still sees something useful.
+			for i, pt := range pts {
+				pointIDStr := fmt.Sprintf("%v", pt.ID)
+				sb.WriteString(fmt.Sprintf("  %s Document: ID %s (Score: %s)\n",
+					idStyle.Render(fmt.Sprintf("[%d]", i+1)),
+					pointIDStr,
+					scoreStyle.Render(fmt.Sprintf("%.4f", pt.Score)),
+				))
+				emitChunkText(pt.ExtractText())
+				if i < len(pts)-1 || gi < len(groups)-1 {
+					sb.WriteString(borderStyle.Render("    "+strings.Repeat("┄", width-8)) + "\n")
+				}
+			}
+			continue
+		}
+
+		// Compute the chunk range covered by this group and the top score.
+		lo, hi := -1, -1
+		var topScore float32
+		for _, p := range pts {
+			idx := extractIdx(p)
+			if idx >= 0 {
+				if lo < 0 || idx < lo {
+					lo = idx
+				}
+				if idx > hi {
+					hi = idx
+				}
+			}
+			if p.Score > topScore {
+				topScore = p.Score
+			}
+		}
+		chunkRangeStr := ""
+		if lo >= 0 && hi >= 0 {
+			if lo == hi {
+				chunkRangeStr = fmt.Sprintf("chunks %d of %d", lo, hi)
+			} else {
+				chunkRangeStr = fmt.Sprintf("chunks %d-%d of %d", lo, hi, hi)
+			}
+		} else {
+			chunkRangeStr = fmt.Sprintf("%d chunks", len(pts))
+		}
+
+		sb.WriteString(fmt.Sprintf("  %s %s %s %s (Score: %s)\n",
+			borderStyle.Render("──"),
+			metaStyle.Render(fmt.Sprintf("Document: %s", docName)),
+			chunkStyle.Render("·"),
+			chunkStyle.Render(chunkRangeStr),
+			scoreStyle.Render(fmt.Sprintf("%.4f", topScore)),
+		))
+
+		for _, p := range pts {
+			idx := extractIdx(p)
+			idxTag := ""
+			if idx >= 0 {
+				idxTag = fmt.Sprintf(" (chunk %d, score %.4f)", idx, p.Score)
+			} else {
+				idxTag = fmt.Sprintf(" (score %.4f)", p.Score)
+			}
+			sb.WriteString(metaStyle.Render("    • chunk") + idxTag + "\n")
+			emitChunkText(p.ExtractText())
+		}
+
+		if gi < len(groups)-1 {
+			sb.WriteString(borderStyle.Render("    "+strings.Repeat("┄", width-8)) + "\n")
+		}
+	}
+
 	return sb.String()
 }
 
@@ -1000,6 +1188,34 @@ func isHexHash(s string) bool {
 		}
 	}
 	return true
+}
+
+// formatNumber formats an integer with thousands separators (e.g. 1234567 -> "1,234,567").
+// Used for human-readable progress and stats messages in the header / status bar.
+func formatNumber(n int) string {
+	if n < 0 {
+		return "-" + formatNumber(-n)
+	}
+	s := fmt.Sprintf("%d", n)
+	if len(s) <= 3 {
+		return s
+	}
+	// Insert commas from the right.
+	var b strings.Builder
+	pre := len(s) % 3
+	if pre > 0 {
+		b.WriteString(s[:pre])
+		if len(s) > pre {
+			b.WriteString(",")
+		}
+	}
+	for i := pre; i < len(s); i += 3 {
+		b.WriteString(s[i : i+3])
+		if i+3 < len(s) {
+			b.WriteString(",")
+		}
+	}
+	return b.String()
 }
 
 // renderMarkdown converts raw markdown into styled terminal output using Glamour.

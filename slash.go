@@ -7,6 +7,8 @@ import (
 
 	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"qquestio/internal/rag"
 )
 
 // handleSlashCmd parses and dispatches slash commands.
@@ -100,6 +102,116 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				return slashResultMsg{feedback: fmt.Sprintf("Filter applied → [any document field] = %s", val)}
 			}
 			return slashResultMsg{feedback: fmt.Sprintf("Filter applied → %s = %s", key, val)}
+
+		case "/cap":
+			if len(args) == 0 {
+				// Show current cap + mode
+				modeStr := m.searchMode
+				if modeStr == "" {
+					modeStr = "auto"
+				}
+				capStr := "none"
+				if m.searchCap > 0 {
+					capStr = fmt.Sprintf("%d", m.searchCap)
+				}
+				return slashResultMsg{feedback: fmt.Sprintf("Search cap → %s | mode → %s", capStr, modeStr)}
+			}
+			arg := strings.ToLower(strings.TrimSpace(args[0]))
+			// Mode commands first (do not change the numeric cap)
+			switch arg {
+			case "auto":
+				m.searchMode = "auto"
+				return slashResultMsg{feedback: "Search mode → auto (server-side brute-force when cap=0, HNSW when cap>0)"}
+			case "exact":
+				m.searchMode = "exact"
+				return slashResultMsg{feedback: "Search mode → exact (server-side brute-force via params.exact=true — MAX SPEED, full Qdrant CPU)"}
+			case "local":
+				m.searchMode = "local"
+				return slashResultMsg{feedback: "Search mode → local (client-side brute-force on all local CPU cores — fallback for when Qdrant refuses params.exact=true)"}
+			}
+			if arg == "off" || arg == "none" || arg == "unlimited" {
+				m.searchCap = 0
+				return slashResultMsg{feedback: "Search cap cleared (searches full corpus via Qdrant brute-force by default)"}
+			}
+			n, err := strconv.Atoi(args[0])
+			if err != nil || n < 1 {
+				return appErrMsg{
+					err:    fmt.Errorf("/cap requires a positive integer, 'off', or a mode: 'auto' | 'exact' | 'local'"),
+					reason: "Usage: /cap <N> | /cap off | /cap auto | /cap exact | /cap local",
+					stage:  "slash",
+				}
+			}
+			m.searchCap = n
+			return slashResultMsg{feedback: fmt.Sprintf("Search cap → %d (HNSW candidate pool limited to top-%d before returning %d docs)", n, n, m.searchLimit)}
+
+		case "/cache":
+			if len(args) == 0 || args[0] == "status" {
+				info, err := rag.CacheInfo(m.collection)
+				if err != nil {
+					return appErrMsg{err: err, reason: "Failed to read cache info", stage: "slash"}
+				}
+				dir := rag.CacheDir()
+				return systemLogMsg{
+					content:  fmt.Sprintf("Cache directory: %s\nCollection: %s\nStatus: %s", dir, m.collection, info),
+					feedback: fmt.Sprintf("Cache status for %s", m.collection),
+				}
+			}
+			if args[0] == "refresh" {
+				m.cacheForceRefresh = true
+				return slashResultMsg{feedback: "Cache refresh armed: next full-corpus query will re-scroll Qdrant"}
+			}
+			if args[0] == "warmup" {
+				return warmupCacheMsg{}
+			}
+			if args[0] == "clear" {
+				if err := rag.DeleteCorpusCache(m.collection); err != nil {
+					return appErrMsg{err: err, reason: "Failed to delete cache", stage: "slash"}
+				}
+				m.cacheInfo = ""
+				return slashResultMsg{feedback: fmt.Sprintf("Cache cleared for %s", m.collection)}
+			}
+			if args[0] == "dir" {
+				return slashResultMsg{feedback: fmt.Sprintf("Cache dir: %s", rag.CacheDir())}
+			}
+			return appErrMsg{
+				err:    fmt.Errorf("unknown /cache subcommand: %s", args[0]),
+				reason: "Usage: /cache [status|refresh|warmup|clear|dir]",
+				stage:  "slash",
+			}
+
+		case "/expand":
+			if len(args) == 0 {
+				// Show current value.
+				if m.searchExpand == 0 {
+					return slashResultMsg{feedback: "Context expand → off (top-N only, no adjacent chunks)"}
+				}
+				return slashResultMsg{feedback: fmt.Sprintf("Context expand → ±%d adjacent chunks per match", m.searchExpand)}
+			}
+			arg := strings.ToLower(strings.TrimSpace(args[0]))
+			if arg == "off" || arg == "none" || arg == "0" {
+				m.searchExpand = 0
+				return slashResultMsg{feedback: "Context expand → off (legacy top-N only)"}
+			}
+			n, err := strconv.Atoi(args[0])
+			if err != nil || n < 0 {
+				return appErrMsg{
+					err:    fmt.Errorf("/expand requires a non-negative integer or 'off'"),
+					reason: "Usage: /expand <N> | /expand off  (0 = off, 1 = ±1, 2 = ±2, ...)",
+					stage:  "slash",
+				}
+			}
+			if n > 20 {
+				return appErrMsg{
+					err:    fmt.Errorf("/expand value too large: %d", n),
+					reason: "Expand must be between 0 and 20 (each ±N pull adds chunks and slows the query)",
+					stage:  "slash",
+				}
+			}
+			m.searchExpand = n
+			if n == 0 {
+				return slashResultMsg{feedback: "Context expand → off (legacy top-N only)"}
+			}
+			return slashResultMsg{feedback: fmt.Sprintf("Context expand → ±%d adjacent chunks per match from the same document", n)}
 
 		case "/rerank":
 			if len(args) != 1 {
@@ -198,6 +310,9 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 			helpText := "Available Slash Commands:\n" +
 				"  /collection <name>  - Switch the active Qdrant collection\n" +
 				"  /limit <1-100>      - Set the number of context documents to retrieve\n" +
+				"  /expand <N|off>     - ±N adjacent chunks from the same doc per match (0=off, 1=default)\n" +
+				"  /cap [N|off]        - Set/clear the candidate pool cap (0/no cap = full corpus)\n" +
+				"  /cache [status|refresh|warmup|clear|dir] - Inspect or control the on-disk corpus cache\n" +
 				"  /filter [key] <val> - Filter search (e.g. '/filter file_name guide.txt' or '/filter guide.txt')\n" +
 				"  /rerank <on|off>    - Enable/disable the reranker step\n" +
 				"  /mode <strict|hybrid>- Switch RAG mode (strict closed-book vs hybrid general-knowledge)\n" +
