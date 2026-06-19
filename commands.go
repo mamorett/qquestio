@@ -457,7 +457,8 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 				"1. BLEND LOCAL CONTEXT WITH GENERAL KNOWLEDGE: Combine the facts directly mentioned in the 'Retrieved Context Chunks' below with your general knowledge base to construct a complete, rich, and detailed explanation.\n" +
 				"2. EXPLICIT DISTINCTION & ATTRIBUTION: You must explicitly state which parts of your explanation are retrieved directly from local sources, and which parts are contributed by your general knowledge. Cite local sources inline (e.g. '[Document: filename | Chunk X]').\n" +
 				"3. CREATIVE & PROFESSIONAL EXTENSION: Connect different parts of the context with narrative explanation, background info, and details, ensuring a highly helpful and well-structured result.\n" +
-				"4. TRANSPARENT UNCERTAINTY: If you are unsure or are presenting general knowledge info, clearly label it as general/historical knowledge to maintain clarity."
+				"4. TRANSPARENT UNCERTAINTY: If you are unsure or are presenting general knowledge info, clearly label it as general/historical knowledge to maintain clarity.\n" +
+				"5. CONTEXT ISOLATION: When answering the current question, only treat the current turn's 'Retrieved Context Chunks' as active local context. Do not reuse or reference document details from previous turns unless they are explicitly present in the current turn's 'Retrieved Context Chunks' below."
 		} else {
 			system = "You are QQuestio, a state-of-the-art enterprise RAG assistant. " +
 				"Your primary mandate is to perform deep, highly rigorous, and completely grounded research to provide extremely accurate answers. " +
@@ -466,7 +467,8 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 				"2. ABSOLUTELY NO GENERAL KNOWLEDGE OR HALLUCINATION: You are forbidden from using any external or general knowledge not contained in the provided chunks. Do NOT make up any information under any circumstances. If the retrieved chunks do not contain the answer, you must state: 'I am sorry, but the retrieved context does not contain enough information to answer this question.' Do not attempt to enrich the answer with general knowledge or speculation.\n" +
 				"3. SUPER DEEP & METICULOUS ANALYSIS: Carefully examine every single line of the retrieved context. Synthesize details across multiple chunks, cross-reference them, and provide a comprehensive, highly thorough, well-reasoned, and step-by-step grounded answer.\n" +
 				"4. COMPULSORY SOURCE CITATION: Every claim, statement of fact, or explanation you write must be directly followed by an inline citation to its source document and chunk (e.g. '[Document: filename | Chunk X]'). If a statement cannot be cited, do not write it.\n" +
-				"5. HIGHEST GROUNDING FIDELITY: Treat the retrieved context as the absolute and only source of truth. Prioritize absolute factual correctness over creative writing or helpfulness."
+				"5. HIGHEST GROUNDING FIDELITY: Treat the retrieved context as the absolute and only source of truth. Prioritize absolute factual correctness over creative writing or helpfulness.\n" +
+				"6. DO NOT REUSE CONTEXT FROM PREVIOUS TURNS: Rely ONLY on the chunks listed in the current turn's 'Retrieved Context Chunks' section. Do NOT reference or reuse facts, documents, or chunks mentioned in previous turns of the conversation history unless they are also present in the current turn's 'Retrieved Context Chunks' below."
 		}
 	}
 	if toolPrompt := m.skills.ForPrompt(); toolPrompt != "" {

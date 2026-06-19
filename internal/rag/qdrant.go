@@ -1725,7 +1725,7 @@ func SearchQdrantExactPhrases(
 	// 1. Fetch indexed text fields.
 	textFields, err := GetTextIndexedFields(ctx, baseURL, apiKey, collection)
 	if err != nil || len(textFields) == 0 {
-		textFields = []string{"text", "content", "document", "page_content"}
+		textFields = []string{"text", "content", "document", "page_content", "description", "body", "passage", "chunk", "context"}
 	}
 
 	// 2. Build filter conditions for matching the first phrase.

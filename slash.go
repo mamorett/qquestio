@@ -396,6 +396,8 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 			m.lastPoints = nil
 			m.ragContext = ""
 			m.output = ""
+			m.exactPhrase = ""
+			m.exactPhrases = nil
 			m.history = append(m.history, ConversationTurn{
 				Role:    "system",
 				Content: "[ Conversation and references cleared ]",

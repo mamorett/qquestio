@@ -518,6 +518,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateViewport()
 			cmds = append(cmds, m.rerankPointsCmd(msg))
 		} else {
+			if m.exactPhrase != "" && len(msg.points) == 0 {
+				m.state = stateIdle
+				m.statusMsg = "Ready"
+				m.output = "No matches found for the exact phrase(s) in the corpus."
+				m.history = append(m.history,
+					ConversationTurn{Role: "user", Content: m.lastQuery},
+					ConversationTurn{Role: "assistant", Content: m.output},
+				)
+				m.lastQuery = ""
+				m.exactPhrase = ""
+				m.exactPhrases = nil
+				m.updateViewport()
+				return m, nil
+			}
 			m.ragContext = msg.context
 			m.lastPoints = msg.points
 			m.state = stateStreaming
@@ -561,6 +575,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				)
 				m.lastQuery = ""
 				m.output = ""
+				m.exactPhrase = ""
+				m.exactPhrases = nil
 				m.updateViewport()
 				if m.streamReader != nil {
 					_ = m.streamReader.Close()
