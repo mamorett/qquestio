@@ -171,6 +171,7 @@ func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 				if cache, _, cerr := rag.LoadCorpusCache(m.collection); cerr == nil && cache != nil {
 					age := time.Since(cache.CachedAt).Truncate(time.Second)
 					m.cacheInfo = fmt.Sprintf("✓ %s pts (%s old)", formatNumber(cache.PointCount), age)
+					m.cacheFilterAtWarmup = cache.FilterAtWarmup
 				}
 			}
 			return searchResultMsg{context: results, points: points, primaryPoints: points, expansionMap: rag.ExpansionMap{}, expand: 0}
@@ -289,6 +290,7 @@ func (m *Model) warmupCacheCmd() tea.Cmd {
 		if cache, _, cerr := rag.LoadCorpusCache(m.collection); cerr == nil && cache != nil {
 			age := time.Since(cache.CachedAt).Truncate(time.Second)
 			m.cacheInfo = fmt.Sprintf("✓ %s pts (%s old)", formatNumber(cache.PointCount), age)
+			m.cacheFilterAtWarmup = cache.FilterAtWarmup
 		}
 
 		return systemLogMsg{
@@ -306,6 +308,11 @@ func (m *Model) executeSkillCmd(name, args string) tea.Cmd {
 			return skillResultMsg{err: fmt.Errorf("skill not found: %s", name)}
 		}
 		res, err := skill.Execute(m.ctx, []byte(args))
+		// Truncate skill output to 8 KiB to prevent prompt-size explosion
+		const maxOutputSize = 8192
+		if len(res) > maxOutputSize {
+			res = res[:maxOutputSize] + "\n[... Output truncated to 8 KiB ...]"
+		}
 		return skillResultMsg{name: name, input: args, output: res, err: err}
 	}
 }

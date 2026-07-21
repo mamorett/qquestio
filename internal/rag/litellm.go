@@ -32,14 +32,7 @@ type LiteLLMRequest struct {
 // StartLiteLLMStream opens the SSE connection.
 // Request: POST /chat/completions { "model": m, "messages": msgs, "stream": true }
 func StartLiteLLMStream(ctx context.Context, baseURL, apiKey, model string, messages []ChatMessage) (*SSEReader, error) {
-	url := baseURL
-	if !strings.Contains(url, "/chat/completions") {
-		if strings.HasSuffix(strings.TrimSuffix(url, "/"), "/v1") {
-			url = strings.TrimSuffix(url, "/") + "/chat/completions"
-		} else {
-			url = strings.TrimSuffix(url, "/") + "/v1/chat/completions"
-		}
-	}
+	url := AppendAPIPath(baseURL, "chat/completions")
 
 	reqBody := LiteLLMRequest{
 		Model:    model,
@@ -62,7 +55,7 @@ func StartLiteLLMStream(ctx context.Context, baseURL, apiKey, model string, mess
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	client := &http.Client{Timeout: 0}
+	client := newHTTPClient(0)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP stream request failed: %w", err)

@@ -1,5 +1,9 @@
 # ◉ QQuestio — Enterprise RAG TUI
 
+<p align="center">
+  <img src="logo.png" alt="QQuestio Logo" width="500" />
+</p>
+
 QQuestio is an enterprise-grade, terminal-based Retrieval-Augmented Generation (RAG) user interface built with Go and the **Charmbracelet ecosystem** (`bubbletea`, `lipgloss`, `viewport`, `textinput`, `spinner`).
 
 Designed around the **Nord color palette**, QQuestio delivers a visually stunning, low-latency, and interactive interface for semantic searching and multi-turn conversations with local or hosted LLMs, utilizing a completely non-blocking async HTTP pipelines architecture.
@@ -24,40 +28,41 @@ Designed around the **Nord color palette**, QQuestio delivers a visually stunnin
 
 QQuestio is built upon a deterministic State Machine that sequences async pipeline stages:
 
-```
-                      ┌──────────────────────────────┐
-                      │                              │
-                      ▼                              │
-   ┌──────────┐  Enter key   ┌──────────────┐        │
-   │ stateIdle │────────────►│ stateEmbedding│       │
-   └──────────┘              └──────┬───────┘        │
-        ▲                          │                 │
-        │                    embeddingMsg            │
-        │                          │                 │
-        │                          ▼                 │
-        │                   ┌─────────────┐          │
-        │                   │stateSearching│         │
-        │                   └──────┬──────┘          │
-        │                          │                 │
-        │                   searchResultMsg          │
-        │                          │                 │
-        │                          ▼                 │
-        │                   ┌─────────────┐          │
-        │                   │stateReranking│ (optional)
-        │                   └──────┬──────┘          │
-        │                          │                 │
-        │                    rerankResultMsg         │
-        │                          │                 │
-        │                          ▼                 │
-        │                   ┌─────────────┐          │
-        │                   │stateStreaming │─── streamChunkMsg (done=false)
-        │                   └──────┬──────┘          │
-        │                          │                 │
-        │                streamChunkMsg (done=true)   │
-        │                          │                 │
-        └──────────────────────────┘                 │
-                                                     │
-   stateError ◄── appErrMsg (from any stage) ────────┘
+```mermaid
+flowchart TD
+    stateIdle([Idle])
+    stateEmbedding([Embedding Vector Generation])
+    stateSearching([Similarity Search - Qdrant])
+    stateReranking([Reranking Candidates - Optional])
+    stateStreaming([SSE LLM Streaming])
+    stateConfirmQuit([Quit Confirmation Dialog])
+    stateConfirmSkill([Skill Execution Confirmation Dialog])
+    stateError([Error View])
+    Exit([Exit])
+
+    stateIdle -->|Submit prompt| stateEmbedding
+    stateEmbedding -->|embeddingMsg| stateSearching
+    stateSearching -->|searchResultMsg - Rerank on| stateReranking
+    stateSearching -->|searchResultMsg - Rerank off| stateStreaming
+    stateReranking -->|rerankResultMsg| stateStreaming
+    
+    stateStreaming -->|Tool call - requires confirm| stateConfirmSkill
+    stateConfirmSkill -->|Y Allow once / A Allow always| stateSearching
+    stateConfirmSkill -->|N Deny / Cancel| stateIdle
+    
+    stateStreaming -->|Tool call - confirm off| stateSearching
+    stateStreaming -->|streamChunkMsg - done=false| stateStreaming
+    stateStreaming -->|streamChunkMsg - done=true| stateIdle
+
+    stateIdle -->|Ctrl+C| stateConfirmQuit
+    stateConfirmQuit -->|Ctrl+C or Y| Exit
+    stateConfirmQuit -->|Esc or N| stateIdle
+
+    stateEmbedding -->|appErrMsg| stateError
+    stateSearching -->|appErrMsg| stateError
+    stateReranking -->|appErrMsg| stateError
+    stateStreaming -->|appErrMsg| stateError
+    stateError -->|Enter key - Clear error| stateIdle
 ```
 
 ---
@@ -85,6 +90,8 @@ QQuestio supports three configuration methods. Values are merged with the follow
 | `RERANKER_MODEL` / `reranker_model` | Optional model name for the rerank endpoint | No | `bge-reranker-large` |
 | `SEARCH_CAP` / `search_cap` / `--search-cap` | Optional upper bound on the Qdrant search candidate pool. `0` (default) = no cap, search the full corpus. See [Search Scope vs. Return Count](#-search-scope-vs-return-count) below. | No | `50000` |
 | `CONTEXT_LIMIT` / `context_limit` | Maximum token limit (4-chars ≈ 1 token heuristic). Auto-compaction triggers at 85%. Default is `131072`. Set to `0` to disable auto-compaction. | No | `131072` |
+| `QQUESTIO_HTTP_TIMEOUT` / `http_timeout_seconds` | Request timeout in seconds for all external API calls (defaults to 60s). | No | `60` |
+| `QQUESTIO_SKILLS_REQUIRE_CONFIRM` / `skills_require_confirm` / `--safe` | Gating safety check that requires user verification prior to running any local tools/skills (defaults to false). | No | `true` |
 
 ### 1. Example `config.json`
 ```json
@@ -102,7 +109,9 @@ QQuestio supports three configuration methods. Values are merged with the follow
   "reranker_api_key": "your-reranker-key",
   "reranker_model": "bge-reranker-large",
   "search_cap": 0,
-  "context_limit": 131072
+  "context_limit": 131072,
+  "http_timeout_seconds": 60,
+  "skills_require_confirm": false
 }
 ```
 

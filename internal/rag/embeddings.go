@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 )
 
 type EmbeddingRequest struct {
@@ -24,14 +23,7 @@ type EmbeddingResponse struct {
 // Request:  POST { "model": model, "input": [query] }
 // Response: { "data": [{ "embedding": [0.1, 0.2, ...] }] }
 func GetEmbedding(ctx context.Context, baseURL, apiKey, model, text string) ([]float32, error) {
-	url := baseURL
-	if !strings.Contains(url, "/embeddings") && !strings.Contains(url, "/embedding") {
-		if strings.HasSuffix(strings.TrimSuffix(url, "/"), "/v1") {
-			url = strings.TrimSuffix(url, "/") + "/embeddings"
-		} else {
-			url = strings.TrimSuffix(url, "/") + "/v1/embeddings"
-		}
-	}
+	url := AppendAPIPath(baseURL, "embeddings")
 
 	reqBody := EmbeddingRequest{
 		Model: model,
@@ -52,7 +44,7 @@ func GetEmbedding(ctx context.Context, baseURL, apiKey, model, text string) ([]f
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	client := &http.Client{}
+	client := newHTTPClient(HTTPTimeout)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)

@@ -13,6 +13,8 @@ import (
 
 // handleSlashCmd parses and dispatches slash commands.
 // Mutations happen inside the returned tea.Cmd closure which captures the *Model pointer.
+// Note: This pattern of direct Model mutation inside command closures is safe because
+// Bubble Tea dispatches and processes all messages serially.
 func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 	return func() tea.Msg {
 		parts := strings.Fields(raw)
