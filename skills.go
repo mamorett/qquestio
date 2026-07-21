@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Skill defines a local tool that can be executed during the generation loop.
@@ -129,7 +130,16 @@ func (BashSkill) Execute(ctx context.Context, args []byte) (string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+
+	timer := time.AfterFunc(30*time.Second, func() {
+		_ = cmd.Process.Kill()
+	})
+	defer timer.Stop()
+
+	err := cmd.Wait()
 	output := stdout.String()
 	if stderr.Len() > 0 {
 		if output != "" {

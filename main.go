@@ -35,6 +35,7 @@ func main() {
 	versionFlag := flag.Bool("version", false, "Print version information and exit")
 	vFlag := flag.Bool("v", false, "Print version information and exit")
 	searchCapFlag := flag.Int("search-cap", -1, "Maximum candidate pool for Qdrant search (-1 = no CLI override, 0 = no cap, N = cap to N)")
+	safeFlag := flag.Bool("safe", false, "Require user confirmation before executing any local skills/tools")
 	flag.Parse()
 
 	if *versionFlag || *vFlag {
@@ -56,6 +57,10 @@ func main() {
 	// CLI flag takes highest precedence for the initial cap (only if explicitly set)
 	if *searchCapFlag >= 0 {
 		cfg.SearchCap = *searchCapFlag
+	}
+
+	if *safeFlag || os.Getenv("QQUESTIO_SKILLS_REQUIRE_CONFIRM") == "1" {
+		cfg.SkillsRequireConfirm = true
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)

@@ -152,9 +152,8 @@ func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vecto
 	var filter *QdrantFilter
 	if filterKey != "" && filterValue != "" {
 		isDocKey := false
-		docKeys := []string{"file_name", "filename", "file_path", "title", "document", "doc_name", "source", "source_file"}
-		for _, dk := range docKeys {
-			if strings.ToLower(filterKey) == dk {
+		for _, dk := range DocumentIDKeys {
+			if strings.ToLower(filterKey) == strings.ToLower(dk) {
 				isDocKey = true
 				break
 			}
@@ -162,12 +161,10 @@ func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vecto
 
 		if isDocKey || filterKey == "*" || filterKey == "any_file" {
 			var shouldConds []QdrantFieldCondition
-			for _, dk := range docKeys {
+			for _, dk := range DocumentIDKeys {
 				shouldConds = append(shouldConds, QdrantFieldCondition{
-					Key: dk,
-					Match: QdrantMatch{
-						Value: filterValue,
-					},
+					Key:   dk,
+					Match: QdrantMatch{Value: filterValue},
 				})
 			}
 			filter = &QdrantFilter{
@@ -208,7 +205,7 @@ func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vecto
 		req.Header.Set("api-key", apiKey)
 	}
 
-	client := &http.Client{}
+	client := newHTTPClient(HTTPTimeout)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", nil, fmt.Errorf("HTTP request failed: %w", err)
@@ -460,7 +457,11 @@ func SearchQdrantFullCorpus(
 		dim = len(points[0].Vector)
 	}
 	if dim > 0 {
-		_ = SaveCorpusCache(collection, dim, points)
+		filterAtWarmup := ""
+		if filterKey != "" && filterValue != "" {
+			filterAtWarmup = filterKey + "=" + filterValue
+		}
+		_ = SaveCorpusCache(collection, dim, points, filterAtWarmup)
 	}
 
 	// 4. Compute top-N.
@@ -506,7 +507,7 @@ func scrollAllPoints(
 	const batchSize = 10000
 	var all []QdrantPoint
 	var offset interface{}
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := newHTTPClient(60 * time.Second)
 
 	for {
 		select {
@@ -572,17 +573,16 @@ func scrollAllPoints(
 // buildFilter constructs the Qdrant filter the same way SearchQdrant does,
 // so the two paths produce equivalent behavior.
 func buildFilter(filterKey, filterValue string) *QdrantFilter {
-	docKeys := []string{"file_name", "filename", "file_path", "title", "document", "doc_name", "source", "source_file"}
 	isDocKey := false
-	for _, dk := range docKeys {
-		if strings.ToLower(filterKey) == dk {
+	for _, dk := range DocumentIDKeys {
+		if strings.ToLower(filterKey) == strings.ToLower(dk) {
 			isDocKey = true
 			break
 		}
 	}
 	if isDocKey || filterKey == "*" || filterKey == "any_file" {
 		var shouldConds []QdrantFieldCondition
-		for _, dk := range docKeys {
+		for _, dk := range DocumentIDKeys {
 			shouldConds = append(shouldConds, QdrantFieldCondition{
 				Key:   dk,
 				Match: QdrantMatch{Value: filterValue},
@@ -603,10 +603,9 @@ func applyFilter(points []QdrantPoint, filterKey, filterValue string) []QdrantPo
 	if filterKey == "" || filterValue == "" {
 		return points
 	}
-	docKeys := []string{"file_name", "filename", "file_path", "title", "document", "doc_name", "source", "source_file"}
 	isDocKey := false
-	for _, dk := range docKeys {
-		if strings.ToLower(filterKey) == dk {
+	for _, dk := range DocumentIDKeys {
+		if strings.ToLower(filterKey) == strings.ToLower(dk) {
 			isDocKey = true
 			break
 		}
@@ -617,7 +616,7 @@ func applyFilter(points []QdrantPoint, filterKey, filterValue string) []QdrantPo
 		if isDocKey || filterKey == "*" || filterKey == "any_file" {
 			// Should: any doc-key matches.
 			matched := false
-			for _, dk := range docKeys {
+			for _, dk := range DocumentIDKeys {
 				if v, ok := p.Payload[dk]; ok {
 					if s, ok := v.(string); ok && s == filterValue {
 						matched = true
@@ -907,7 +906,7 @@ func GetCollectionInfo(ctx context.Context, baseURL, apiKey, collection string) 
 		req.Header.Set("api-key", apiKey)
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := newHTTPClient(30 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, 0, "", err
@@ -928,12 +927,12 @@ func GetCollectionInfo(ctx context.Context, baseURL, apiKey, collection string) 
 
 
 
-// docIDKeys is the ordered list of payload keys we look at to identify which
+// DocumentIDKeys is the ordered list of payload keys we look at to identify which
 // "document" a chunk belongs to. The first non-empty string match wins.
-var docIDKeys = []string{
+var DocumentIDKeys = []string{
 	"file_name", "filename", "fileName", "document_name", "doc_name",
 	"document", "doc", "source_file", "sourceFile", "source",
-	"title", "path",
+	"title", "path", "file_path", "name", "url",
 }
 
 // chunkIndexKeys is the ordered list of payload keys we look at to find a
@@ -973,7 +972,7 @@ func extractDocID(p QdrantPoint) string {
 	if p.Payload == nil {
 		return ""
 	}
-	for _, k := range docIDKeys {
+	for _, k := range DocumentIDKeys {
 		if v, ok := p.Payload[k]; ok {
 			if s, ok := v.(string); ok && s != "" {
 				return s
@@ -1180,6 +1179,11 @@ func SearchWithContextExpansionDetailed(
 		}
 	}
 
+	seen := make(map[interface{}]struct{})
+	for _, c := range totalPoints {
+		seen[idKey(c.ID)] = struct{}{}
+	}
+
 	// Also append any primary points that had no chunk_index / docID at all.
 	for _, pt := range primaryPoints {
 		docID := extractDocID(pt)
@@ -1187,14 +1191,9 @@ func SearchWithContextExpansionDetailed(
 		if docID != "" && idx >= 0 {
 			continue
 		}
-		dup := false
-		for _, existing := range totalPoints {
-			if fmt.Sprintf("%v", existing.ID) == fmt.Sprintf("%v", pt.ID) {
-				dup = true
-				break
-			}
-		}
-		if !dup {
+		key := idKey(pt.ID)
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
 			text := pt.ExtractText()
 			if text != "" {
 				sb.WriteString(text)
@@ -1341,6 +1340,11 @@ func ApplyExpansionToPrimaries(
 		}
 	}
 
+	seen := make(map[interface{}]struct{})
+	for _, c := range out {
+		seen[idKey(c.ID)] = struct{}{}
+	}
+
 	// Append primaries that had no docID/chunk_index (no expansion possible).
 	for _, pt := range primaries {
 		docID := extractDocID(pt)
@@ -1348,14 +1352,9 @@ func ApplyExpansionToPrimaries(
 		if docID != "" && idx >= 0 {
 			continue
 		}
-		dup := false
-		for _, existing := range out {
-			if fmt.Sprintf("%v", existing.ID) == fmt.Sprintf("%v", pt.ID) {
-				dup = true
-				break
-			}
-		}
-		if !dup {
+		key := idKey(pt.ID)
+		if _, ok := seen[key]; !ok {
+			seen[key] = struct{}{}
 			if t := pt.ExtractText(); t != "" {
 				sb.WriteString(t)
 				sb.WriteString("\n---\n")
@@ -1408,7 +1407,7 @@ func exactSearchWithPoints(
 		req.Header.Set("api-key", apiKey)
 	}
 
-	client := &http.Client{}
+	client := newHTTPClient(HTTPTimeout)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", nil, fmt.Errorf("HTTP request failed: %w", err)
@@ -1505,7 +1504,7 @@ func scrollAdjacentChunks(
 func scrollOneRange(ctx context.Context, url, apiKey string, r docRange) []QdrantPoint {
 	var all []QdrantPoint
 	var offset interface{}
-	client := &http.Client{Timeout: 60 * time.Second}
+	client := newHTTPClient(60 * time.Second)
 
 	for {
 		select {
@@ -1665,7 +1664,7 @@ func GetTextIndexedFields(ctx context.Context, baseURL, apiKey, collection strin
 		req.Header.Set("api-key", apiKey)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := newHTTPClient(10 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -1801,7 +1800,7 @@ func scrollWithFilter(
 	const batchSize = 100
 	var all []QdrantPoint
 	var offset interface{}
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := newHTTPClient(30 * time.Second)
 
 	for {
 		select {
@@ -1852,10 +1851,25 @@ func scrollWithFilter(
 
 		all = append(all, scrollResp.Result.Points...)
 
-		if scrollResp.Result.NextPageOffset == nil {
-			break
-		}
-		offset = scrollResp.Result.NextPageOffset
 	}
 	return all, nil
+}
+
+func idKey(id interface{}) interface{} {
+	switch v := id.(type) {
+	case float64:
+		return uint64(v)
+	case float32:
+		return uint64(v)
+	case int:
+		return uint64(v)
+	case int64:
+		return uint64(v)
+	case uint64:
+		return v
+	case string:
+		return v
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }

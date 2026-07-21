@@ -22,16 +22,17 @@ import (
 // trades a tiny bit of space for much faster load/save than 1M tiny JSON
 // objects.
 type CorpusCache struct {
-	Collection string    `json:"collection"`
-	Dimension  int       `json:"dimension"`
-	PointCount int       `json:"point_count"`
-	CachedAt   time.Time `json:"cached_at"`
-	filePath   string
+	Collection     string    `json:"collection"`
+	Dimension      int       `json:"dimension"`
+	PointCount     int       `json:"point_count"`
+	CachedAt       time.Time `json:"cached_at"`
+	FilterAtWarmup string    `json:"filter_at_warmup"`
+	filePath       string
 }
 
 const (
 	cacheMagic   uint32 = 0x51434341 // "QQCA" in little-endian
-	cacheVersion uint8  = 1
+	cacheVersion uint8  = 2
 )
 
 // CacheDir returns the directory where corpus caches are stored.
@@ -203,19 +204,33 @@ func parseCacheBytes(collection string, data []byte) (*CorpusCache, []QdrantPoin
 		})
 	}
 
+	var filterAtWarmup string
+	if version >= 2 {
+		var filterLen uint32
+		if err := binary.Read(r, binary.LittleEndian, &filterLen); err != nil {
+			return nil, nil, fmt.Errorf("cache: failed to read filter length: %w", err)
+		}
+		filterBytes := make([]byte, filterLen)
+		if _, err := r.Read(filterBytes); err != nil {
+			return nil, nil, fmt.Errorf("cache: failed to read filter string: %w", err)
+		}
+		filterAtWarmup = string(filterBytes)
+	}
+
 	cache := &CorpusCache{
-		Collection: cachedCollection,
-		Dimension:  int(dim),
-		PointCount: int(pointCount),
-		CachedAt:   time.Unix(tsUnix, 0),
-		filePath:   CachePath(collection),
+		Collection:     cachedCollection,
+		Dimension:      int(dim),
+		PointCount:     int(pointCount),
+		CachedAt:       time.Unix(tsUnix, 0),
+		FilterAtWarmup: filterAtWarmup,
+		filePath:       CachePath(collection),
 	}
 	return cache, points, nil
 }
 
 // SaveCorpusCache persists a corpus to disk. All points must share the same
 // vector dimension. Existing cache files for the same collection are replaced.
-func SaveCorpusCache(collection string, dim int, points []QdrantPoint) error {
+func SaveCorpusCache(collection string, dim int, points []QdrantPoint, filterAtWarmup string) error {
 	if len(points) == 0 {
 		return fmt.Errorf("refusing to save empty corpus")
 	}
@@ -240,6 +255,11 @@ func SaveCorpusCache(collection string, dim int, points []QdrantPoint) error {
 
 	_ = binary.Write(&buf, binary.LittleEndian, uint32(dim))
 	_ = binary.Write(&buf, binary.LittleEndian, uint64(len(points)))
+
+	// Write filter string
+	filterBytes := []byte(filterAtWarmup)
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(len(filterBytes)))
+	buf.Write(filterBytes)
 
 	// Payload blob (one JSON array of all payloads)
 	allPayloads := make([]map[string]interface{}, len(points))

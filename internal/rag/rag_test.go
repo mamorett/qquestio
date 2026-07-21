@@ -353,7 +353,7 @@ func TestCorpusCache_SaveLoad(t *testing.T) {
 		{ID: float64(3), Payload: map[string]interface{}{"text": "goodbye", "file_name": "c.txt"}, Vector: []float32{0.5, 0.5, 0.5, 0.5}, Score: 0.1},
 	}
 
-	if err := SaveCorpusCache(collection, dim, points); err != nil {
+	if err := SaveCorpusCache(collection, dim, points, ""); err != nil {
 		t.Fatalf("SaveCorpusCache failed: %v", err)
 	}
 
@@ -424,7 +424,7 @@ func TestCorpusCache_Delete(t *testing.T) {
 
 	if err := SaveCorpusCache(collection, 2, []QdrantPoint{
 {ID: 1, Payload: map[string]interface{}{"x": "y"}, Vector: []float32{1, 0}},
-}); err != nil {
+}, ""); err != nil {
 		t.Fatalf("SaveCorpusCache failed: %v", err)
 	}
 
@@ -457,7 +457,7 @@ func TestCorpusCache_SafeName(t *testing.T) {
 	collection := "my/unsafe name with spaces & symbols!@#"
 	if err := SaveCorpusCache(collection, 2, []QdrantPoint{
 {ID: 1, Payload: map[string]interface{}{"x": "y"}, Vector: []float32{1, 0}},
-}); err != nil {
+}, ""); err != nil {
 		t.Fatalf("SaveCorpusCache with unsafe name failed: %v", err)
 	}
 

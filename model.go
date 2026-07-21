@@ -32,6 +32,7 @@ const (
 	stateStreaming                   // Receiving LLM SSE chunks
 	stateError                       // Displaying error, input still active
 	stateConfirmQuit                  // Awaiting exit confirmation (first Ctrl+C pressed)
+	stateConfirmSkill                // Awaiting skill execution confirmation
 )
 
 type ConversationTurn struct {
@@ -64,7 +65,8 @@ type Model struct {
 	filterValue       string // Active filter metadata value
 	disableReranker   bool   // Toggle to bypass reranker step
 	cacheForceRefresh bool   // When true, the next full-corpus search re-scrolls Qdrant (set by /cache refresh, auto-cleared after one use)
-	cacheInfo         string // Last known cache summary for header display (e.g. "✓ 1.2M pts, 2m ago")
+	cacheInfo           string // Last known cache summary for header display (e.g. "✓ 1.2M pts, 2m ago")
+	cacheFilterAtWarmup string // The filter string used during cache warming
 
 	// --- FSM ---
 	state appState
@@ -106,6 +108,10 @@ type Model struct {
 
 	// --- Skills ---
 	skills SkillRegistry
+
+	pendingSkillName    string
+	pendingSkillArgs    string
+	skillsAlwaysAllowed bool
 
 	// --- Dimensions ---
 	width  int
@@ -220,6 +226,8 @@ func NewModel(ctx context.Context, cfg Config) *Model {
 
 	sessionID := time.Now().Format("20060102-150405")
 
+	rag.HTTPTimeout = time.Duration(cfg.HTTPTimeoutSeconds) * time.Second
+
 	return &Model{
 		cfg:             cfg,
 		sessionID:       sessionID,
@@ -255,38 +263,7 @@ func (m *Model) Init() tea.Cmd {
 	)
 }
 
-// extractExactPhrase strips surrounding standard or smart quotes from a query.
-func extractExactPhrase(raw string) string {
-	s := strings.TrimSpace(raw)
-	quotes := []string{"\"", "“", "”", "„", "«", "»"}
 
-	hasPrefix := false
-	for _, q := range quotes {
-		if strings.HasPrefix(s, q) {
-			hasPrefix = true
-			break
-		}
-	}
-	hasSuffix := false
-	for _, q := range quotes {
-		if strings.HasSuffix(s, q) {
-			hasSuffix = true
-			break
-		}
-	}
-
-	if hasPrefix && hasSuffix {
-		for _, q := range quotes {
-			s = strings.TrimPrefix(s, q)
-			s = strings.TrimSuffix(s, q)
-		}
-		s = strings.TrimSpace(s)
-		if len(s) > 0 {
-			return s
-		}
-	}
-	return ""
-}
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Filter out leaked CSI/SGR mouse escape sequences that some terminals
@@ -360,6 +337,52 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			// Swallow all other keys while the dialog is visible.
+			return m, nil
+		}
+
+		if m.state == stateConfirmSkill {
+			switch msg.Type {
+			case tea.KeyRunes:
+				switch strings.ToLower(string(msg.Runes)) {
+				case "y":
+					m.state = stateSearching
+					m.statusMsg = fmt.Sprintf("Executing skill '%s'...", m.pendingSkillName)
+					name := m.pendingSkillName
+					args := m.pendingSkillArgs
+					m.pendingSkillName = ""
+					m.pendingSkillArgs = ""
+					return m, m.executeSkillCmd(name, args)
+				case "a":
+					m.skillsAlwaysAllowed = true
+					m.state = stateSearching
+					m.statusMsg = fmt.Sprintf("Executing skill '%s'...", m.pendingSkillName)
+					name := m.pendingSkillName
+					args := m.pendingSkillArgs
+					m.pendingSkillName = ""
+					m.pendingSkillArgs = ""
+					return m, m.executeSkillCmd(name, args)
+				case "n":
+					name := m.pendingSkillName
+					m.pendingSkillName = ""
+					m.pendingSkillArgs = ""
+					m.state = stateIdle
+					m.statusMsg = fmt.Sprintf("Skill '%s' execution denied", name)
+					m.updateViewport()
+					return m, func() tea.Msg {
+						return skillResultMsg{
+							name: name,
+							err:  fmt.Errorf("skill execution denied by user"),
+						}
+					}
+				}
+			case tea.KeyEscape, tea.KeyCtrlC:
+				m.pendingSkillName = ""
+				m.pendingSkillArgs = ""
+				m.state = stateIdle
+				m.statusMsg = "Skill execution cancelled"
+				m.updateViewport()
+				return m, nil
+			}
 			return m, nil
 		}
 		switch msg.Type {
@@ -540,7 +563,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.done {
 			// Check if output contains a tool call
 			if name, args, ok := ParseCall(m.output); ok {
-				m.statusMsg = fmt.Sprintf("Executing skill '%s'...", name)
 				cleanedOutput := cleanLLMOutput(m.output)
 				if cleanedOutput == "" {
 					cleanedOutput = m.output
@@ -550,7 +572,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					ConversationTurn{Role: "assistant", Content: cleanedOutput, References: m.lastPoints},
 				)
 				m.updateViewport()
-				cmds = append(cmds, m.executeSkillCmd(name, args))
+
+				if m.cfg.SkillsRequireConfirm && !m.skillsAlwaysAllowed {
+					m.state = stateConfirmSkill
+					m.pendingSkillName = name
+					m.pendingSkillArgs = args
+					m.statusMsg = fmt.Sprintf("Awaiting confirmation to run skill '%s'...", name)
+				} else {
+					m.statusMsg = fmt.Sprintf("Executing skill '%s'...", name)
+					cmds = append(cmds, m.executeSkillCmd(name, args))
+				}
 			} else {
 				// Stream complete
 				m.state = stateIdle
@@ -699,34 +730,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		headerH := 4
-		if m.cfg.RerankerURL != "" {
-			headerH = 5
-		}
-		footerH := 3
-
-		refWidth := m.width / 3
-		if refWidth < 20 {
-			refWidth = 20
-		}
-		if refWidth > m.width/2 {
-			refWidth = m.width/2
-		}
-		mainWidth := m.width - refWidth
-
-		bodyHeight := m.height - headerH - footerH
-		viewportHeight := bodyHeight - 2
-		if viewportHeight < 1 {
-			viewportHeight = 1
-		}
-
-		m.viewport.Width = mainWidth - 2
-		m.viewport.Height = viewportHeight
-
-		m.refViewport.Width = refWidth - 2
-		m.refViewport.Height = viewportHeight
-
-		m.textInput.Width = m.width - 4
+		m.recalcLayout()
 		m.updateViewport()
 	}
 
@@ -988,10 +992,44 @@ func (m *Model) renderHeader() string {
 	// Border separator
 	border := lipgloss.NewStyle().Foreground(nord3).Render(strings.Repeat("─", m.width))
 
+	linesList := []string{line1, line2, line3}
 	if line4 != "" {
-		return lipgloss.JoinVertical(lipgloss.Left, line1, line2, line3, line4, border)
+		linesList = append(linesList, line4)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, line1, line2, line3, border)
+
+	if m.cacheInfo != "" {
+		currentFilter := ""
+		if m.filterKey != "" && m.filterValue != "" {
+			currentFilter = m.filterKey + "=" + m.filterValue
+		}
+		if currentFilter != m.cacheFilterAtWarmup {
+			warmupDesc := m.cacheFilterAtWarmup
+			if warmupDesc == "" {
+				warmupDesc = "none"
+			}
+			currDesc := currentFilter
+			if currDesc == "" {
+				currDesc = "none"
+			}
+			warningLine := fmt.Sprintf(" ⚠  Warning: Cache built under filter '%s'; current filter '%s' — refresh to apply", warmupDesc, currDesc)
+			if lipgloss.Width(warningLine) > m.width && m.width > 20 {
+				warningLine = warningLine[:m.width-4] + "... "
+			}
+			padding := m.width - lipgloss.Width(warningLine)
+			if padding > 0 {
+				warningLine += strings.Repeat(" ", padding)
+			}
+			renderedWarning := lipgloss.NewStyle().
+				Foreground(nord0).
+				Background(nord13).
+				Bold(true).
+				Render(warningLine)
+			linesList = append(linesList, renderedWarning)
+		}
+	}
+
+	linesList = append(linesList, border)
+	return lipgloss.JoinVertical(lipgloss.Left, linesList...)
 }
 
 func (m *Model) renderFooter() string {
@@ -1005,6 +1043,25 @@ func (m *Model) renderFooter() string {
 		return lipgloss.NewStyle().
 			Foreground(nord6).
 			Background(nord11).
+			Bold(true).
+			Render(confirmText)
+	}
+	if m.state == stateConfirmSkill {
+		argsPreview := strings.ReplaceAll(m.pendingSkillArgs, "\n", " ")
+		if len(argsPreview) > 30 {
+			argsPreview = argsPreview[:27] + "..."
+		}
+		confirmText := fmt.Sprintf(" ⚠  Allow skill execution: '%s %s'?  [Y] Allow once  [A] Allow always  [N] Deny ", m.pendingSkillName, argsPreview)
+		if lipgloss.Width(confirmText) > m.width && m.width > 20 {
+			confirmText = confirmText[:m.width-4] + "... "
+		}
+		padding := m.width - lipgloss.Width(confirmText)
+		if padding > 0 {
+			confirmText += strings.Repeat(" ", padding)
+		}
+		return lipgloss.NewStyle().
+			Foreground(nord0).
+			Background(nord13).
 			Bold(true).
 			Render(confirmText)
 	}
@@ -1083,8 +1140,47 @@ func (m *Model) updateRefViewport() {
 	m.refViewport.SetContent(rendered)
 }
 
+func (m *Model) recalcLayout() {
+	headerH := 4
+	if m.cfg.RerankerURL != "" {
+		headerH = 5
+	}
+	currentFilter := ""
+	if m.filterKey != "" && m.filterValue != "" {
+		currentFilter = m.filterKey + "=" + m.filterValue
+	}
+	if m.cacheInfo != "" && currentFilter != m.cacheFilterAtWarmup {
+		headerH++
+	}
+	footerH := 3
+
+	refWidth := m.width / 3
+	if refWidth < 20 {
+		refWidth = 20
+	}
+	if refWidth > m.width/2 {
+		refWidth = m.width/2
+	}
+	mainWidth := m.width - refWidth
+
+	bodyHeight := m.height - headerH - footerH
+	viewportHeight := bodyHeight - 2
+	if viewportHeight < 1 {
+		viewportHeight = 1
+	}
+
+	m.viewport.Width = mainWidth - 2
+	m.viewport.Height = viewportHeight
+
+	m.refViewport.Width = refWidth - 2
+	m.refViewport.Height = viewportHeight
+
+	m.textInput.Width = m.width - 4
+}
+
 // updateViewport constructs and renders the conversation history in the viewport.
 func (m *Model) updateViewport() {
+	m.recalcLayout()
 	var sb strings.Builder
 
 	// Render past conversation turns
@@ -1632,10 +1728,7 @@ func extractDocumentName(payload map[string]interface{}) string {
 		return ""
 	}
 
-	targetKeys := []string{
-		"file_name", "filename", "fileName", "document_name", "doc_name",
-		"document", "doc", "source_file", "sourceFile", "title", "source", "name", "path", "url",
-	}
+	targetKeys := rag.DocumentIDKeys
 
 	var hashCandidate string
 
@@ -1835,6 +1928,15 @@ func (m *Model) saveSession() error {
 	}
 	filePath := filepath.Join(dir, m.sessionID+".json")
 
+	historyCopy := make([]ConversationTurn, len(m.history))
+	for i, turn := range m.history {
+		historyCopy[i] = ConversationTurn{
+			Role:       turn.Role,
+			Content:    turn.Content,
+			References: turn.References,
+		}
+	}
+
 	sess := Session{
 		ID:           m.sessionID,
 		Collection:   m.collection,
@@ -1847,7 +1949,7 @@ func (m *Model) saveSession() error {
 		RAGMode:      m.ragMode,
 		FilterKey:    m.filterKey,
 		FilterValue:  m.filterValue,
-		History:      m.history,
+		History:      historyCopy,
 	}
 
 	data, err := json.MarshalIndent(sess, "", "  ")
