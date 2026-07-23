@@ -33,8 +33,9 @@ type rerankResultMsg struct {
 
 // streamChunkMsg is Phase 3 (Stage 3): one chunk from LiteLLM SSE stream.
 type streamChunkMsg struct {
-	content string
-	done    bool // true when stream is exhausted
+	content   string
+	reasoning string
+	done      bool // true when stream is exhausted
 }
 
 // appErrMsg wraps errors that happen during the pipeline stages.
@@ -99,5 +100,15 @@ type skillResultMsg struct {
 	input  string
 	output string
 	err    error
+}
+
+// llmInfoMsg represents the LLM connection check result.
+type llmInfoMsg struct {
+	err error
+}
+
+// embedderInfoMsg represents the embedder connection check result.
+type embedderInfoMsg struct {
+	err error
 }
 

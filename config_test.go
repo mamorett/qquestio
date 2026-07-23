@@ -99,6 +99,28 @@ func TestLoadConfig_JSONConfig(t *testing.T) {
 	if cfg.QdrantAPIKey != "system-overridden" {
 		t.Errorf("expected QDRANT_API_KEY to be overridden by system env, got %s", cfg.QdrantAPIKey)
 	}
+
+	// 3. OpenAIMaxTokens & ContextLimit defaults validation (should be 0 when undefined)
+	if cfg.OpenAIMaxTokens != 0 {
+		t.Errorf("expected default OpenAIMaxTokens to be 0, got %d", cfg.OpenAIMaxTokens)
+	}
+	if cfg.ContextLimit != 0 {
+		t.Errorf("expected default ContextLimit to be 0, got %d", cfg.ContextLimit)
+	}
+
+	// 4. Honoring exact values check
+	t.Setenv("OPENAI_MAX_TOKENS", "16384")
+	t.Setenv("CONTEXT_LIMIT", "32768")
+	cfg, err = LoadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.OpenAIMaxTokens != 16384 {
+		t.Errorf("expected OpenAIMaxTokens to be exactly 16384, got %d", cfg.OpenAIMaxTokens)
+	}
+	if cfg.ContextLimit != 32768 {
+		t.Errorf("expected ContextLimit to be exactly 32768, got %d", cfg.ContextLimit)
+	}
 }
 
 func TestLoadConfig_RerankerPool(t *testing.T) {
@@ -150,6 +172,99 @@ func TestLoadConfig_RerankerPool(t *testing.T) {
 	}
 	if cfg.RerankerPool != 150 {
 		t.Errorf("expected RerankerPool 150, got %d", cfg.RerankerPool)
+	}
+}
+
+func TestLoadConfig_MultipleProfiles(t *testing.T) {
+	os.Clearenv()
+
+	jsonContent := `{
+		"qdrant_url": "http://localhost:6333",
+		"qdrant_api_key": "root-key",
+		"embedding_url": "http://localhost:8080",
+		"embedding_model": "nomic-embed",
+		"openai_url": "http://localhost:4000",
+		"openai_model": "llama3",
+		"default_collection": "documents",
+		"default_configuration": "dev",
+		"configurations": {
+			"dev": {
+				"default_collection": "dev-docs",
+				"openai_model": "llama3-dev"
+			},
+			"prod": {
+				"qdrant_url": "http://prod-qdrant:6333",
+				"default_collection": "prod-docs",
+				"openai_model": "gpt-4",
+				"qdrant_vector_name": "prod-vec"
+			}
+		}
+	}`
+
+	err := os.WriteFile("config.json", []byte(jsonContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write mock config.json file: %v", err)
+	}
+	defer os.Remove("config.json")
+
+	// 1. Loading with no arguments should fall back to default_configuration ("dev")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ActiveConfigName != "dev" {
+		t.Errorf("expected ActiveConfigName to be 'dev', got %s", cfg.ActiveConfigName)
+	}
+	if cfg.DefaultCollection != "dev-docs" {
+		t.Errorf("expected DefaultCollection to be 'dev-docs' from 'dev' profile, got %s", cfg.DefaultCollection)
+	}
+	if cfg.OpenAIModel != "llama3-dev" {
+		t.Errorf("expected OpenAIModel to be 'llama3-dev' from 'dev' profile, got %s", cfg.OpenAIModel)
+	}
+	if cfg.QdrantURL != "http://localhost:6333" {
+		t.Errorf("expected QdrantURL to inherit root 'http://localhost:6333', got %s", cfg.QdrantURL)
+	}
+
+	// 2. Loading explicit "prod" configuration
+	cfgProd, err := LoadConfig("prod")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfgProd.ActiveConfigName != "prod" {
+		t.Errorf("expected ActiveConfigName to be 'prod', got %s", cfgProd.ActiveConfigName)
+	}
+	if cfgProd.DefaultCollection != "prod-docs" {
+		t.Errorf("expected DefaultCollection to be 'prod-docs', got %s", cfgProd.DefaultCollection)
+	}
+	if cfgProd.OpenAIModel != "gpt-4" {
+		t.Errorf("expected OpenAIModel to be 'gpt-4', got %s", cfgProd.OpenAIModel)
+	}
+	if cfgProd.QdrantURL != "http://prod-qdrant:6333" {
+		t.Errorf("expected QdrantURL to override to 'http://prod-qdrant:6333', got %s", cfgProd.QdrantURL)
+	}
+	if cfgProd.QdrantVectorName != "prod-vec" {
+		t.Errorf("expected QdrantVectorName to be 'prod-vec', got %s", cfgProd.QdrantVectorName)
+	}
+
+	// 3. Loading non-existent configuration should error
+	_, err = LoadConfig("staging")
+	if err == nil {
+		t.Fatal("expected error when loading non-existent profile, got nil")
+	}
+	if !contains(err.Error(), "configuration \"staging\" not found") {
+		t.Errorf("expected error to mention staging not found, got: %v", err)
+	}
+
+	// 4. Test GetAvailableConfigs
+	names, defaultConf, err := GetAvailableConfigs()
+	if err != nil {
+		t.Fatalf("unexpected error getting configs: %v", err)
+	}
+	if defaultConf != "dev" {
+		t.Errorf("expected default config to be 'dev', got %s", defaultConf)
+	}
+	if len(names) != 2 || names[0] != "dev" || names[1] != "prod" {
+		t.Errorf("expected names to be ['dev', 'prod'], got %v", names)
 	}
 }
 

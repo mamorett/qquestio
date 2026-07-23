@@ -66,3 +66,9 @@ func GetEmbedding(ctx context.Context, baseURL, apiKey, model, text string) ([]f
 
 	return respBody.Data[0].Embedding, nil
 }
+
+// CheckEmbeddingConnection tests the connection to the embedding endpoint by embedding a dummy string.
+func CheckEmbeddingConnection(ctx context.Context, baseURL, apiKey, model string) error {
+	_, err := GetEmbedding(ctx, baseURL, apiKey, model, "ping")
+	return err
+}

@@ -349,3 +349,84 @@ func TestHandleSlashCmd_RerankerPool(t *testing.T) {
 	}
 }
 
+func TestHandleSlashCmd_Conf(t *testing.T) {
+	os.Clearenv()
+
+	jsonContent := `{
+		"qdrant_url": "http://localhost:6333",
+		"qdrant_api_key": "root-key",
+		"embedding_url": "http://localhost:8080",
+		"embedding_model": "nomic-embed",
+		"openai_url": "http://localhost:4000",
+		"openai_model": "llama3",
+		"default_collection": "documents",
+		"default_configuration": "dev",
+		"configurations": {
+			"dev": {
+				"default_collection": "dev-docs",
+				"openai_model": "llama3-dev"
+			},
+			"prod": {
+				"default_collection": "prod-docs",
+				"openai_model": "gpt-4"
+			}
+		}
+	}`
+
+	err := os.WriteFile("config.json", []byte(jsonContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write mock config.json file: %v", err)
+	}
+	defer os.Remove("config.json")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error loading config: %v", err)
+	}
+
+	m := NewModel(context.Background(), cfg)
+
+	// 1. Run /conf with no arguments -> should show active and available configurations
+	cmdShow := m.handleSlashCmd("/conf")
+	msgShow := cmdShow()
+	resShow, ok := msgShow.(systemLogMsg)
+	if !ok {
+		t.Fatalf("expected systemLogMsg, got %T", msgShow)
+	}
+	if !strings.Contains(resShow.feedback, "Active configuration: dev") {
+		t.Errorf("expected feedback to contain active configuration, got %s", resShow.feedback)
+	}
+	if !strings.Contains(resShow.content, "Available configurations: dev, prod") {
+		t.Errorf("expected content to contain available configurations, got %s", resShow.content)
+	}
+
+	// 2. Switch configuration to "prod"
+	cmdSwitch := m.handleSlashCmd("/conf prod")
+	msgSwitch := cmdSwitch()
+	resSwitch, ok := msgSwitch.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msgSwitch)
+	}
+	if !strings.Contains(resSwitch.feedback, "Switched to configuration → prod") {
+		t.Errorf("unexpected feedback: %s", resSwitch.feedback)
+	}
+
+	if m.cfg.ActiveConfigName != "prod" {
+		t.Errorf("expected ActiveConfigName to be prod, got %s", m.cfg.ActiveConfigName)
+	}
+	if m.collection != "prod-docs" {
+		t.Errorf("expected collection to be updated to prod-docs, got %s", m.collection)
+	}
+	if m.cfg.OpenAIModel != "gpt-4" {
+		t.Errorf("expected OpenAIModel to be updated to gpt-4, got %s", m.cfg.OpenAIModel)
+	}
+
+	// 3. Switch to non-existent configuration -> should error
+	cmdErr := m.handleSlashCmd("/conf invalid_config")
+	msgErr := cmdErr()
+	_, ok = msgErr.(appErrMsg)
+	if !ok {
+		t.Fatalf("expected appErrMsg, got %T", msgErr)
+	}
+}
+

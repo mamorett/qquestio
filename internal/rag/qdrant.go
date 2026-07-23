@@ -32,14 +32,21 @@ type QdrantRange struct {
 }
 
 type QdrantFieldCondition struct {
-	Key   string       `json:"key"`
-	Match QdrantMatch  `json:"match,omitempty"`
-	Range *QdrantRange `json:"range,omitempty"`
+	Key   string        `json:"key"`
+	Match *QdrantMatch  `json:"match,omitempty"`
+	Range *QdrantRange  `json:"range,omitempty"`
 }
 
 type QdrantFilter struct {
 	Must   []QdrantFieldCondition `json:"must,omitempty"`
 	Should []QdrantFieldCondition `json:"should,omitempty"`
+}
+
+var QdrantVectorName = ""
+
+type QdrantNamedVector struct {
+	Name   string    `json:"name"`
+	Vector []float32 `json:"vector"`
 }
 
 // QdrantSearchParams controls server-side search behavior.
@@ -49,6 +56,7 @@ type QdrantSearchParams struct {
 
 type QdrantQueryRequest struct {
 	Query       []float32           `json:"query"`
+	Using       string              `json:"using,omitempty"`
 	Filter      *QdrantFilter       `json:"filter,omitempty"`
 	Limit       int                 `json:"limit"`
 	WithPayload bool                `json:"with_payload"`
@@ -56,7 +64,7 @@ type QdrantQueryRequest struct {
 }
 
 type QdrantSearchRequest struct {
-	Vector      []float32           `json:"vector"`
+	Vector      interface{}         `json:"vector"`
 	Filter      *QdrantFilter       `json:"filter,omitempty"`
 	Limit       int                 `json:"limit"`
 	WithPayload bool                `json:"with_payload"`
@@ -70,6 +78,29 @@ type QdrantPoint struct {
 	Vector        []float32              `json:"vector,omitempty"`
 	OriginalScore float32                `json:"original_score,omitempty"`
 	IsPrimary     bool                   `json:"is_primary,omitempty"`
+}
+
+func (p *QdrantPoint) UnmarshalJSON(data []byte) error {
+	type Alias QdrantPoint
+	var aux struct {
+		Alias
+		Vectors map[string][]float32 `json:"vectors"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*p = QdrantPoint(aux.Alias)
+	if len(p.Vector) == 0 && len(aux.Vectors) > 0 {
+		if val, ok := aux.Vectors[QdrantVectorName]; ok {
+			p.Vector = val
+		} else {
+			for _, val := range aux.Vectors {
+				p.Vector = val
+				break
+			}
+		}
+	}
+	return nil
 }
 
 type QdrantQueryResponse struct {
@@ -164,7 +195,7 @@ func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vecto
 			for _, dk := range DocumentIDKeys {
 				shouldConds = append(shouldConds, QdrantFieldCondition{
 					Key:   dk,
-					Match: QdrantMatch{Value: filterValue},
+					Match: &QdrantMatch{Value: filterValue},
 				})
 			}
 			filter = &QdrantFilter{
@@ -175,7 +206,7 @@ func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vecto
 				Must: []QdrantFieldCondition{
 					{
 						Key: filterKey,
-						Match: QdrantMatch{
+						Match: &QdrantMatch{
 							Value: filterValue,
 						},
 					},
@@ -186,6 +217,7 @@ func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vecto
 
 	reqBody := QdrantQueryRequest{
 		Query:       vector,
+		Using:       QdrantVectorName,
 		Filter:      filter,
 		Limit:       candidateLimit,
 		WithPayload: true,
@@ -213,7 +245,7 @@ func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vecto
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", nil, fmt.Errorf("HTTP status error: %d %s", resp.StatusCode, resp.Status)
+		return "", nil, qdrantStatusError(resp)
 	}
 
 	var respBody QdrantQueryResponse
@@ -347,6 +379,11 @@ type QdrantCollectionInfo struct {
 		Status       string `json:"status"`
 		PointsCount  int    `json:"points_count"`
 		VectorsCount int    `json:"vectors_count"`
+		Config       struct {
+			Params struct {
+				Vectors json.RawMessage `json:"vectors"`
+			} `json:"params"`
+		} `json:"config"`
 	} `json:"result"`
 	Status string `json:"status"`
 }
@@ -585,14 +622,14 @@ func buildFilter(filterKey, filterValue string) *QdrantFilter {
 		for _, dk := range DocumentIDKeys {
 			shouldConds = append(shouldConds, QdrantFieldCondition{
 				Key:   dk,
-				Match: QdrantMatch{Value: filterValue},
+				Match: &QdrantMatch{Value: filterValue},
 			})
 		}
 		return &QdrantFilter{Should: shouldConds}
 	}
 	return &QdrantFilter{
 		Must: []QdrantFieldCondition{
-			{Key: filterKey, Match: QdrantMatch{Value: filterValue}},
+			{Key: filterKey, Match: &QdrantMatch{Value: filterValue}},
 		},
 	}
 }
@@ -895,6 +932,20 @@ func extractTexts(points []QdrantPoint) []string {
 // sqrt was previously a custom Newton's method implementation.
 // Now uses math.Sqrt directly for SIMD-optimized hardware FPU instructions.
 
+type SingleVectorConfig struct {
+	Size     int    `json:"size"`
+	Distance string `json:"distance"`
+}
+
+func containsName(list []string, name string) bool {
+	for _, item := range list {
+		if item == name {
+			return true
+		}
+	}
+	return false
+}
+
 // GetCollectionInfo retrieves metadata stats for the active collection from Qdrant.
 func GetCollectionInfo(ctx context.Context, baseURL, apiKey, collection string) (int, int, string, error) {
 	url := fmt.Sprintf("%s/collections/%s", strings.TrimSuffix(baseURL, "/"), collection)
@@ -914,12 +965,49 @@ func GetCollectionInfo(ctx context.Context, baseURL, apiKey, collection string) 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, 0, "", fmt.Errorf("HTTP status: %s", resp.Status)
+		return 0, 0, "", qdrantStatusError(resp)
 	}
 
 	var info QdrantCollectionInfo
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
 		return 0, 0, "", err
+	}
+
+	// Auto-detect vector name based on the collection's vectors parameter
+	if len(info.Result.Config.Params.Vectors) > 0 {
+		var single SingleVectorConfig
+		_ = json.Unmarshal(info.Result.Config.Params.Vectors, &single)
+		if single.Size > 0 {
+			// Flat object -> unnamed vector
+			QdrantVectorName = ""
+		} else {
+			// Object map -> named vectors
+			var named map[string]interface{}
+			if err := json.Unmarshal(info.Result.Config.Params.Vectors, &named); err == nil && len(named) > 0 {
+				var names []string
+				for name := range named {
+					names = append(names, name)
+				}
+				sort.Strings(names)
+
+				// If user has not configured a specific valid vector name, auto-detect it
+				if QdrantVectorName == "" || !containsName(names, QdrantVectorName) {
+					selected := ""
+					// Look for standard named vectors
+					for _, std := range []string{"text", "content", "document", "vector"} {
+						if containsName(names, std) {
+							selected = std
+							break
+						}
+					}
+					if selected == "" {
+						selected = names[0] // fallback to first alphabetically
+					}
+					QdrantVectorName = selected
+					log.Printf("[Qdrant] Auto-selected vector name: %q from available: %v", QdrantVectorName, names)
+				}
+			}
+		}
 	}
 
 	return info.Result.PointsCount, info.Result.VectorsCount, info.Result.Status, nil
@@ -1385,8 +1473,16 @@ func exactSearchWithPoints(
 		filter = buildFilter(filterKey, filterValue)
 	}
 
+	var vecParam interface{} = vector
+	if QdrantVectorName != "" {
+		vecParam = QdrantNamedVector{
+			Name:   QdrantVectorName,
+			Vector: vector,
+		}
+	}
+
 	reqBody := QdrantSearchRequest{
-		Vector:      vector,
+		Vector:      vecParam,
 		Filter:      filter,
 		Limit:       docs,
 		WithPayload: true,
@@ -1415,7 +1511,7 @@ func exactSearchWithPoints(
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", nil, fmt.Errorf("HTTP status error: %d %s", resp.StatusCode, resp.Status)
+		return "", nil, qdrantStatusError(resp)
 	}
 
 	var respBody QdrantQueryResponse
@@ -1522,7 +1618,7 @@ func scrollOneRange(ctx context.Context, url, apiKey string, r docRange) []Qdran
 			Offset:      offset,
 			Filter: &QdrantFilter{
 				Must: []QdrantFieldCondition{
-					{Key: "file_name", Match: QdrantMatch{Value: r.docID}},
+					{Key: "file_name", Match: &QdrantMatch{Value: r.docID}},
 					{
 						Key:   "chunk_index",
 						Range: &QdrantRange{Gte: &loF, Lte: &hiF},
@@ -1672,7 +1768,7 @@ func GetTextIndexedFields(ctx context.Context, baseURL, apiKey, collection strin
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP status: %s", resp.Status)
+		return nil, qdrantStatusError(resp)
 	}
 
 	var raw map[string]interface{}
@@ -1733,7 +1829,7 @@ func SearchQdrantExactPhrases(
 	for _, field := range textFields {
 		shouldConds = append(shouldConds, QdrantFieldCondition{
 			Key:   field,
-			Match: QdrantMatch{Text: primaryPhrase},
+			Match: &QdrantMatch{Text: primaryPhrase},
 		})
 	}
 
@@ -1872,4 +1968,10 @@ func idKey(id interface{}) interface{} {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+func qdrantStatusError(resp *http.Response) error {
+	body := make([]byte, 512)
+	n, _ := resp.Body.Read(body)
+	return fmt.Errorf("HTTP status error: %d %s (body: %s)", resp.StatusCode, resp.Status, string(body[:n]))
 }

@@ -38,6 +38,7 @@ const (
 type ConversationTurn struct {
 	Role                    string            `json:"role"`                      // "user" | "assistant" | "system"
 	Content                 string            `json:"content"`                   // The text content
+	Reasoning               string            `json:"reasoning,omitempty"`       // The thinking process text
 	References              []rag.QdrantPoint `json:"references,omitempty"`      // Retrieved context points (only for assistant responses)
 	RenderedContent         string            `json:"rendered_content,omitempty"` // Cached rendered markdown
 	RenderedWidth           int               `json:"rendered_width,omitempty"`   // The width at which it was rendered
@@ -82,6 +83,7 @@ type Model struct {
 	// --- Conversation ---
 	history       []ConversationTurn // Full conversation history including system info
 	output        string             // Accumulated LLM response text for current turn
+	reasoning     string             // Accumulated thought process text for current turn
 	showRawSource bool               // Toggle between glamour-rendered markdown and raw markdown source
 
 	// --- Pipeline transient ---
@@ -100,6 +102,14 @@ type Model struct {
 	qdrantVectors int
 	qdrantStatus  string
 	qdrantInfoErr error
+
+	// --- LLM Connection Stats ---
+	llmStatus  string
+	llmInfoErr error
+
+	// --- Embedder Connection Stats ---
+	embedderStatus string
+	embedderInfoErr error
 
 	// --- Prompt History ---
 	inputHistory []string
@@ -227,6 +237,7 @@ func NewModel(ctx context.Context, cfg Config) *Model {
 	sessionID := time.Now().Format("20060102-150405")
 
 	rag.HTTPTimeout = time.Duration(cfg.HTTPTimeoutSeconds) * time.Second
+	rag.QdrantVectorName = cfg.QdrantVectorName
 
 	return &Model{
 		cfg:             cfg,
@@ -248,6 +259,8 @@ func NewModel(ctx context.Context, cfg Config) *Model {
 		skills:          NewSkillRegistry(),
 		ctx:             ctx,
 		ragMode:         "strict",
+		llmStatus:       "checking",
+		embedderStatus:  "checking",
 		filterKey:       "",
 		filterValue:     "",
 		disableReranker: false,
@@ -260,6 +273,8 @@ func (m *Model) Init() tea.Cmd {
 		m.spinner.Tick,
 		m.fetchQdrantInfoCmd(),
 		m.preloadCacheInfoCmd(),
+		m.checkLLMInfoCmd(),
+		m.checkEmbedderInfoCmd(),
 	)
 }
 
@@ -569,7 +584,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.history = append(m.history,
 					ConversationTurn{Role: "user", Content: m.lastQuery},
-					ConversationTurn{Role: "assistant", Content: cleanedOutput, References: m.lastPoints},
+					ConversationTurn{
+						Role:       "assistant",
+						Content:    cleanedOutput,
+						Reasoning:  m.reasoning,
+						References: m.lastPoints,
+					},
 				)
 				m.updateViewport()
 
@@ -588,10 +608,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusMsg = "Ready"
 				m.history = append(m.history,
 					ConversationTurn{Role: "user", Content: m.lastQuery},
-					ConversationTurn{Role: "assistant", Content: cleanLLMOutput(m.output), References: m.lastPoints},
+					ConversationTurn{
+						Role:       "assistant",
+						Content:    cleanLLMOutput(m.output),
+						Reasoning:  m.reasoning,
+						References: m.lastPoints,
+					},
 				)
 				m.lastQuery = ""
 				m.output = ""
+				m.reasoning = ""
 				m.updateViewport()
 				if m.streamReader != nil {
 					_ = m.streamReader.Close()
@@ -600,6 +626,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else {
 			m.output += msg.content
+			m.reasoning += msg.reasoning
 			m.updateViewport()
 			cmds = append(cmds, m.receiveStreamChunkCmd())
 		}
@@ -668,7 +695,34 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Content: fmt.Sprintf("Command executed: %s", msg.feedback),
 		})
 		m.updateViewport()
-		cmds = append(cmds, m.fetchQdrantInfoCmd())
+		cmds = append(cmds, m.fetchQdrantInfoCmd(), m.preloadCacheInfoCmd())
+		if strings.Contains(msg.feedback, "Switched to configuration") {
+			m.llmStatus = "checking"
+			m.embedderStatus = "checking"
+			cmds = append(cmds, m.checkLLMInfoCmd(), m.checkEmbedderInfoCmd())
+		}
+
+	case llmInfoMsg:
+		if msg.err != nil {
+			m.llmStatus = "error"
+			m.llmInfoErr = msg.err
+			m.statusMsg = fmt.Sprintf("LLM Connection Error: %v", msg.err)
+		} else {
+			m.llmStatus = "ok"
+			m.llmInfoErr = nil
+		}
+		m.updateViewport()
+
+	case embedderInfoMsg:
+		if msg.err != nil {
+			m.embedderStatus = "error"
+			m.embedderInfoErr = msg.err
+			m.statusMsg = fmt.Sprintf("Embedder Connection Error: %v", msg.err)
+		} else {
+			m.embedderStatus = "ok"
+			m.embedderInfoErr = nil
+		}
+		m.updateViewport()
 
 	case quitMsg:
 		if m.cancelRequest != nil {
@@ -693,6 +747,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case cachePreloadMsg:
 		if msg.found {
 			m.cacheInfo = msg.info
+		} else {
+			m.cacheInfo = ""
 		}
 
 	case warmupCacheMsg:
@@ -931,8 +987,17 @@ func (m *Model) renderHeader() string {
 		)
 	}
 
-	qdrantInfo := fmt.Sprintf(" %s %s  %s  %s %s  %s %s %d  %s  %s %s  %s  %s %s  %s  %s %s  %s  %s %s%s%s",
-		labelStyle.Render("DB:"), valueStyle.Render(m.cfg.QdrantURL),
+	dbStatusDisp := ""
+	if m.qdrantInfoErr != nil {
+		dbStatusDisp = " " + lipgloss.NewStyle().Foreground(nord11).Render("(✗ connection error)")
+	} else if m.qdrantStatus == "" {
+		dbStatusDisp = " " + lipgloss.NewStyle().Foreground(nord13).Render("(checking...)")
+	} else {
+		dbStatusDisp = " " + lipgloss.NewStyle().Foreground(nord14).Render("(✓)")
+	}
+
+	qdrantInfo := fmt.Sprintf(" %s %s%s  %s  %s %s  %s %s %d  %s  %s %s  %s  %s %s  %s  %s %s  %s  %s %s%s%s",
+		labelStyle.Render("DB:"), valueStyle.Render(m.cfg.QdrantURL), dbStatusDisp,
 		delimStyle.Render("│"),
 		labelStyle.Render("Col:"), valueStyle.Render(m.collection),
 		delimStyle.Render("│"),
@@ -955,10 +1020,28 @@ func (m *Model) renderHeader() string {
 	line2 := lipgloss.NewStyle().Background(nord2).Render(qdrantInfo)
 
 	// Line 3: Model and Endpoints Info
-	modelInfo := fmt.Sprintf(" %s %s (%s)  %s  %s %s (%s)",
-		labelStyle.Render("Embed:"), valueStyle.Render(m.cfg.EmbeddingModel), valueStyle.Render(m.cfg.EmbeddingURL),
+	llmStatusDisp := ""
+	if m.llmStatus == "checking" {
+		llmStatusDisp = " " + lipgloss.NewStyle().Foreground(nord13).Render("(checking...)")
+	} else if m.llmStatus == "error" {
+		llmStatusDisp = " " + lipgloss.NewStyle().Foreground(nord11).Render("(✗ connection error)")
+	} else if m.llmStatus == "ok" {
+		llmStatusDisp = " " + lipgloss.NewStyle().Foreground(nord14).Render("(✓)")
+	}
+
+	embedStatusDisp := ""
+	if m.embedderStatus == "checking" {
+		embedStatusDisp = " " + lipgloss.NewStyle().Foreground(nord13).Render("(checking...)")
+	} else if m.embedderStatus == "error" {
+		embedStatusDisp = " " + lipgloss.NewStyle().Foreground(nord11).Render("(✗ connection error)")
+	} else if m.embedderStatus == "ok" {
+		embedStatusDisp = " " + lipgloss.NewStyle().Foreground(nord14).Render("(✓)")
+	}
+
+	modelInfo := fmt.Sprintf(" %s %s%s (%s)  %s  %s %s%s (%s)",
+		labelStyle.Render("Embed:"), valueStyle.Render(m.cfg.EmbeddingModel), embedStatusDisp, valueStyle.Render(m.cfg.EmbeddingURL),
 		delimStyle.Render("│"),
-		labelStyle.Render("LLM:"), valueStyle.Render(m.cfg.OpenAIModel), valueStyle.Render(m.cfg.OpenAIURL),
+		labelStyle.Render("LLM:"), valueStyle.Render(m.cfg.OpenAIModel), llmStatusDisp, valueStyle.Render(m.cfg.OpenAIURL),
 	)
 	line3Pad := m.width - lipgloss.Width(modelInfo)
 	if line3Pad > 0 {
@@ -1087,7 +1170,11 @@ func (m *Model) getRenderedTurn(turn *ConversationTurn) string {
 		targetWidth = 20
 	}
 	if turn.RenderedContent == "" || turn.RenderedWidth != targetWidth {
-		turn.RenderedContent = renderMarkdown(turn.Content, targetWidth)
+		content := turn.Content
+		if turn.Reasoning != "" {
+			content = "*Thinking:*\n" + turn.Reasoning + "\n\n" + content
+		}
+		turn.RenderedContent = renderMarkdown(content, targetWidth)
 		turn.RenderedWidth = targetWidth
 	}
 	return turn.RenderedContent
@@ -1190,7 +1277,11 @@ func (m *Model) updateViewport() {
 			sb.WriteString(lipgloss.NewStyle().Foreground(nord8).Bold(true).Render("❯ You: ") + turn.Content + "\n\n")
 		} else if turn.Role == "assistant" {
 			if m.showRawSource {
-				sb.WriteString(turn.Content + "\n\n")
+				content := turn.Content
+				if turn.Reasoning != "" {
+					content = "*Thinking:*\n" + turn.Reasoning + "\n\n" + content
+				}
+				sb.WriteString(content + "\n\n")
 			} else {
 				sb.WriteString(m.getRenderedTurn(turn) + "\n\n")
 			}
@@ -1235,12 +1326,18 @@ func (m *Model) updateViewport() {
 
 	// Render currently streaming assistant reply
 	if m.state == stateStreaming {
-		if m.output != "" {
+		if m.output != "" || m.reasoning != "" {
+			var currentText string
+			if m.reasoning != "" {
+				currentText = "*Thinking:*\n" + m.reasoning + "\n\n"
+			}
+			currentText += cleanLLMOutput(m.output)
+
 			var streamingText string
 			if m.showRawSource {
-				streamingText = cleanLLMOutput(m.output)
+				streamingText = currentText
 			} else {
-				streamingText = renderMarkdown(cleanLLMOutput(m.output), m.viewport.Width)
+				streamingText = renderMarkdown(currentText, m.viewport.Width)
 			}
 			sb.WriteString(streamingText + "\n\n" + m.spinner.View() + lipgloss.NewStyle().Foreground(nord13).Render(" "+m.loadingMessage) + "\n")
 		} else {
@@ -1413,7 +1510,12 @@ func (m *Model) saveLastResponseCmd(filename string) tea.Cmd {
 	var lastResponse string
 	for i := len(m.history) - 1; i >= 0; i-- {
 		if m.history[i].Role == "assistant" {
-			lastResponse = m.history[i].Content
+			turn := m.history[i]
+			content := turn.Content
+			if turn.Reasoning != "" {
+				content = "*Thinking:*\n" + turn.Reasoning + "\n\n" + content
+			}
+			lastResponse = content
 			break
 		}
 	}
@@ -1444,7 +1546,11 @@ func (m *Model) saveAllConversationCmd(filename string) tea.Cmd {
 		if turn.Role == "user" {
 			sb.WriteString("## ❯ You\n\n" + turn.Content + "\n\n")
 		} else if turn.Role == "assistant" {
-			sb.WriteString("## 🤖 Assistant\n\n" + turn.Content + "\n\n")
+			content := turn.Content
+			if turn.Reasoning != "" {
+				content = "*Thinking:*\n" + turn.Reasoning + "\n\n" + content
+			}
+			sb.WriteString("## 🤖 Assistant\n\n" + content + "\n\n")
 			if len(turn.References) > 0 {
 				sb.WriteString("### References\n\n")
 				for i, pt := range turn.References {

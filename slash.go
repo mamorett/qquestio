@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
@@ -39,6 +40,57 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 			}
 			m.collection = args[0]
 			return slashResultMsg{feedback: fmt.Sprintf("Collection → %s", args[0])}
+
+		case "/conf":
+			if len(args) == 0 {
+				names, defaultConf, err := GetAvailableConfigs()
+				if err != nil {
+					return appErrMsg{
+						err:    err,
+						reason: "Failed to read configuration profiles",
+						stage:  "slash",
+					}
+				}
+				active := m.cfg.ActiveConfigName
+				if active == "" {
+					active = "(none/default)"
+				}
+				var details string
+				if len(names) > 0 {
+					details = fmt.Sprintf("Active configuration: %s\nDefault configuration: %s\nAvailable configurations: %s", active, defaultConf, strings.Join(names, ", "))
+				} else {
+					details = fmt.Sprintf("Active configuration: %s\nNo configuration profiles defined in configurations block.", active)
+				}
+				return systemLogMsg{
+					content:  details,
+					feedback: fmt.Sprintf("Active configuration: %s", active),
+				}
+			}
+			if len(args) > 1 {
+				return appErrMsg{
+					err:    fmt.Errorf("/conf requires at most 1 argument"),
+					reason: "Usage: /conf [config_name]",
+					stage:  "slash",
+				}
+			}
+
+			newCfg, err := LoadConfig(args[0])
+			if err != nil {
+				return appErrMsg{
+					err:    err,
+					reason: fmt.Sprintf("Failed to load configuration %q: %v", args[0], err),
+					stage:  "slash",
+				}
+			}
+
+			m.cfg = newCfg
+			m.collection = newCfg.DefaultCollection
+			m.searchCap = newCfg.SearchCap
+			m.rerankerPool = newCfg.RerankerPool
+			rag.HTTPTimeout = time.Duration(newCfg.HTTPTimeoutSeconds) * time.Second
+			rag.QdrantVectorName = newCfg.QdrantVectorName
+
+			return slashResultMsg{feedback: fmt.Sprintf("Switched to configuration → %s", args[0])}
 
 		case "/limit":
 			if len(args) != 1 {
@@ -319,7 +371,12 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 			var lastResponse string
 			for i := len(m.history) - 1; i >= 0; i-- {
 				if m.history[i].Role == "assistant" {
-					lastResponse = m.history[i].Content
+					turn := m.history[i]
+					content := turn.Content
+					if turn.Reasoning != "" {
+						content = "*Thinking:*\n" + turn.Reasoning + "\n\n" + content
+					}
+					lastResponse = content
 					break
 				}
 			}
@@ -411,6 +468,7 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 		case "/help":
 			helpText := "Available Slash Commands:\n" +
 				"  /collection <name>  - Switch the active Qdrant collection\n" +
+				"  /conf [name]        - View or switch the active configuration profile\n" +
 				"  /limit <1-100>      - Set the number of context documents to retrieve\n" +
 				"  /expand <N|off>     - ±N adjacent chunks from the same doc per match (0=off, 1=default)\n" +
 				"  /cap [N|off]        - Set/clear the candidate pool cap (0/no cap = full corpus)\n" +

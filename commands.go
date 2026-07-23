@@ -236,7 +236,7 @@ func (m *Model) startLLMStreamCmd() tea.Cmd {
 		ctx, cancel := context.WithCancel(m.ctx)
 		m.cancelRequest = cancel
 
-		reader, err := rag.StartLiteLLMStream(ctx, m.cfg.OpenAIURL, m.cfg.OpenAIAPIKey, m.cfg.OpenAIModel, messages)
+		reader, err := rag.StartLiteLLMStream(ctx, m.cfg.OpenAIURL, m.cfg.OpenAIAPIKey, m.cfg.OpenAIModel, m.cfg.OpenAIMaxTokens, m.cfg.ContextLimit, messages)
 		if err != nil {
 			return appErrMsg{err: err, reason: "LLM connection failed", stage: "stream"}
 		}
@@ -253,11 +253,11 @@ func (m *Model) receiveStreamChunkCmd() tea.Cmd {
 		if m.streamReader == nil {
 			return streamChunkMsg{done: true}
 		}
-		chunk, done, err := m.streamReader.Next()
+		chunk, reasoning, done, err := m.streamReader.Next()
 		if err != nil {
 			return appErrMsg{err: err, reason: "Stream read error", stage: "stream"}
 		}
-		return streamChunkMsg{content: chunk, done: done}
+		return streamChunkMsg{content: chunk, reasoning: reasoning, done: done}
 	}
 }
 
@@ -545,4 +545,20 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 	msgs = append(msgs, rag.ChatMessage{Role: "user", Content: userMsg})
 
 	return msgs
+}
+
+// checkLLMInfoCmd tests the connection to the OpenAI/LLM endpoint and returns the result/error.
+func (m *Model) checkLLMInfoCmd() tea.Cmd {
+	return func() tea.Msg {
+		err := rag.CheckLLMConnection(m.ctx, m.cfg.OpenAIURL, m.cfg.OpenAIAPIKey, m.cfg.OpenAIModel)
+		return llmInfoMsg{err: err}
+	}
+}
+
+// checkEmbedderInfoCmd tests the connection to the embedding endpoint and returns the result/error.
+func (m *Model) checkEmbedderInfoCmd() tea.Cmd {
+	return func() tea.Msg {
+		err := rag.CheckEmbeddingConnection(m.ctx, m.cfg.EmbeddingURL, m.cfg.EmbeddingAPIKey, m.cfg.EmbeddingModel)
+		return embedderInfoMsg{err: err}
+	}
 }

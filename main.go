@@ -11,6 +11,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+var (
+	cliSearchCap = -1
+	cliSafe      = false
+)
+
 func main() {
 	// 1. Manually parse optional session flags: -c [session_id]
 	var loadSession bool
@@ -36,7 +41,11 @@ func main() {
 	vFlag := flag.Bool("v", false, "Print version information and exit")
 	searchCapFlag := flag.Int("search-cap", -1, "Maximum candidate pool for Qdrant search (-1 = no CLI override, 0 = no cap, N = cap to N)")
 	safeFlag := flag.Bool("safe", false, "Require user confirmation before executing any local skills/tools")
+	confFlag := flag.String("conf", "", "Configuration profile to load from config file")
 	flag.Parse()
+
+	cliSearchCap = *searchCapFlag
+	cliSafe = *safeFlag
 
 	if *versionFlag || *vFlag {
 		fmt.Printf("QQuestio version v%s\n", Version)
@@ -48,20 +57,13 @@ func main() {
 		defer f.Close()
 	}
 
-	cfg, err := LoadConfig()
+	cfg, err := LoadConfig(*confFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Config error: %v\n", err)
 		os.Exit(1)
 	}
 
-	// CLI flag takes highest precedence for the initial cap (only if explicitly set)
-	if *searchCapFlag >= 0 {
-		cfg.SearchCap = *searchCapFlag
-	}
 
-	if *safeFlag || os.Getenv("QQUESTIO_SKILLS_REQUIRE_CONFIRM") == "1" {
-		cfg.SkillsRequireConfirm = true
-	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()

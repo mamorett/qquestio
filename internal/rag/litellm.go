@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // SSEReader wraps a bufio.Scanner over an SSE HTTP response body.
@@ -24,20 +26,29 @@ type ChatMessage struct {
 }
 
 type LiteLLMRequest struct {
-	Model    string        `json:"model"`
-	Messages []ChatMessage `json:"messages"`
-	Stream   bool          `json:"stream"`
+	Model     string                 `json:"model"`
+	Messages  []ChatMessage          `json:"messages"`
+	Stream    bool                   `json:"stream"`
+	MaxTokens int                    `json:"max_tokens,omitempty"`
+	Options   map[string]interface{} `json:"options,omitempty"`
 }
 
-// StartLiteLLMStream opens the SSE connection.
-// Request: POST /chat/completions { "model": m, "messages": msgs, "stream": true }
-func StartLiteLLMStream(ctx context.Context, baseURL, apiKey, model string, messages []ChatMessage) (*SSEReader, error) {
+func StartLiteLLMStream(ctx context.Context, baseURL, apiKey, model string, maxTokens, contextLimit int, messages []ChatMessage) (*SSEReader, error) {
 	url := AppendAPIPath(baseURL, "chat/completions")
 
 	reqBody := LiteLLMRequest{
 		Model:    model,
 		Messages: messages,
 		Stream:   true,
+	}
+
+	if maxTokens > 0 {
+		reqBody.MaxTokens = maxTokens
+	}
+	if contextLimit > 0 {
+		reqBody.Options = map[string]interface{}{
+			"num_ctx": contextLimit,
+		}
 	}
 
 	jsonData, err := json.Marshal(reqBody)
@@ -61,6 +72,8 @@ func StartLiteLLMStream(ctx context.Context, baseURL, apiKey, model string, mess
 		return nil, fmt.Errorf("HTTP stream request failed: %w", err)
 	}
 
+	log.Printf("[LLM] Connected to stream URL: %s, Status: %s, Content-Type: %s", url, resp.Status, resp.Header.Get("Content-Type"))
+
 	if resp.StatusCode != http.StatusOK {
 		// Read body for error details
 		bodyBytes, _ := io.ReadAll(resp.Body)
@@ -74,12 +87,13 @@ func StartLiteLLMStream(ctx context.Context, baseURL, apiKey, model string, mess
 	}, nil
 }
 
-// Next reads one SSE chunk. Returns (content, isDone, error).
-// Parses "data: {...}" lines, extracts choices[0].delta.content.
+// Next reads one SSE chunk. Returns (content, reasoning, isDone, error).
+// Parses "data: {...}" lines, extracts choices[0].delta.content and choices[0].delta.reasoning.
 // Returns done=true on "data: [DONE]".
-func (r *SSEReader) Next() (string, bool, error) {
+func (r *SSEReader) Next() (string, string, bool, error) {
 	for r.scanner.Scan() {
 		line := r.scanner.Text()
+		log.Printf("[LLM Stream Line] %s", line)
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -91,32 +105,40 @@ func (r *SSEReader) Next() (string, bool, error) {
 
 		dataVal := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if dataVal == "[DONE]" {
-			return "", true, nil
+			return "", "", true, nil
 		}
 
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content string `json:"content"`
+					Content          string `json:"content"`
+					Reasoning        string `json:"reasoning"`
+					ReasoningContent string `json:"reasoning_content"`
 				} `json:"delta"`
 			} `json:"choices"`
 		}
 
 		if err := json.Unmarshal([]byte(dataVal), &chunk); err != nil {
-			return "", false, fmt.Errorf("failed to parse SSE chunk: %w", err)
+			return "", "", false, fmt.Errorf("failed to parse SSE chunk: %w", err)
 		}
 
 		if len(chunk.Choices) > 0 {
 			content := chunk.Choices[0].Delta.Content
-			return content, false, nil
+			reasoning := chunk.Choices[0].Delta.Reasoning
+			if reasoning == "" {
+				reasoning = chunk.Choices[0].Delta.ReasoningContent
+			}
+			if content != "" || reasoning != "" {
+				return content, reasoning, false, nil
+			}
 		}
 	}
 
 	if err := r.scanner.Err(); err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 
-	return "", true, nil
+	return "", "", true, nil
 }
 
 // Close closes the underlying response body.
@@ -124,5 +146,47 @@ func (r *SSEReader) Close() error {
 	if r.body != nil {
 		return r.body.Close()
 	}
+	return nil
+}
+
+// CheckLLMConnection sends a tiny request to the LLM endpoint to verify connectivity and config/credentials.
+func CheckLLMConnection(ctx context.Context, baseURL, apiKey, model string) error {
+	url := AppendAPIPath(baseURL, "chat/completions")
+
+	// Send a minimal prompt to verify model and auth
+	reqBody := map[string]interface{}{
+		"model": model,
+		"messages": []map[string]string{
+			{"role": "user", "content": "ping"},
+		},
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonData))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	// Set a reasonable timeout for checking connection (30 seconds for local GPU model cold starts)
+	client := newHTTPClient(30 * time.Second)
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("connection failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("status error: %d %s (body: %s)", resp.StatusCode, resp.Status, string(bodyBytes))
+	}
+
 	return nil
 }

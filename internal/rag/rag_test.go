@@ -98,23 +98,23 @@ func TestLiteLLMStream(t *testing.T) {
 	}))
 	defer server.Close()
 
-	reader, err := StartLiteLLMStream(context.Background(), server.URL, "test-openai-key", "llm", []ChatMessage{})
+	reader, err := StartLiteLLMStream(context.Background(), server.URL, "test-openai-key", "llm", 16384, 131072, []ChatMessage{})
 	if err != nil {
 		t.Fatalf("unexpected error starting stream: %v", err)
 	}
 	defer reader.Close()
 
-	chunk1, done1, err := reader.Next()
+	chunk1, _, done1, err := reader.Next()
 	if err != nil || done1 || chunk1 != "Hello" {
 		t.Errorf("chunk1 failed: got chunk=%s, done=%v, err=%v", chunk1, done1, err)
 	}
 
-	chunk2, done2, err := reader.Next()
+	chunk2, _, done2, err := reader.Next()
 	if err != nil || done2 || chunk2 != " world" {
 		t.Errorf("chunk2 failed: got chunk=%s, done=%v, err=%v", chunk2, done2, err)
 	}
 
-	chunk3, done3, err := reader.Next()
+	chunk3, _, done3, err := reader.Next()
 	if err != nil || !done3 || chunk3 != "" {
 		t.Errorf("chunk3 failed: got chunk=%s, done=%v, err=%v", chunk3, done3, err)
 	}

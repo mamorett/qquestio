@@ -4,31 +4,41 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 )
 
 type Config struct {
-	QdrantURL         string `json:"qdrant_url"`
-	QdrantAPIKey      string `json:"qdrant_api_key"`
-	EmbeddingURL      string `json:"embedding_url"`
-	EmbeddingAPIKey   string `json:"embedding_api_key"`
-	EmbeddingModel    string `json:"embedding_model"`
-	OpenAIURL         string `json:"openai_url"`
-	OpenAIAPIKey      string `json:"openai_api_key"`
-	OpenAIModel       string `json:"openai_model"`
-	DefaultCollection string `json:"default_collection"`
-	RerankerURL       string `json:"reranker_url"`
-	RerankerAPIKey    string `json:"reranker_api_key"`
-	RerankerModel     string `json:"reranker_model"`
-	SearchCap         int    `json:"search_cap,omitempty"`
-	RerankerPool      int    `json:"reranker_pool,omitempty"`
+	ActiveConfigName     string `json:"active_config_name,omitempty"`
+	QdrantURL            string `json:"qdrant_url"`
+	QdrantAPIKey         string `json:"qdrant_api_key"`
+	QdrantVectorName     string `json:"qdrant_vector_name,omitempty"`
+	EmbeddingURL         string `json:"embedding_url"`
+	EmbeddingAPIKey      string `json:"embedding_api_key"`
+	EmbeddingModel       string `json:"embedding_model"`
+	OpenAIURL            string `json:"openai_url"`
+	OpenAIAPIKey         string `json:"openai_api_key"`
+	OpenAIModel          string `json:"openai_model"`
+	DefaultCollection    string `json:"default_collection"`
+	RerankerURL          string `json:"reranker_url"`
+	RerankerAPIKey       string `json:"reranker_api_key"`
+	RerankerModel        string `json:"reranker_model"`
+	SearchCap            int    `json:"search_cap,omitempty"`
+	RerankerPool         int    `json:"reranker_pool,omitempty"`
 	HTTPTimeoutSeconds   int    `json:"http_timeout_seconds,omitempty"`
 	SkillsRequireConfirm bool   `json:"skills_require_confirm,omitempty"`
 	// ContextLimit is the estimated token budget for the conversation history.
 	// When the conversation exceeds 85% of this limit, history is auto-compacted.
 	// Default: 131072 (128k). Set to 0 to disable auto-compaction entirely.
-	ContextLimit int `json:"context_limit,omitempty"`
+	ContextLimit    int `json:"context_limit,omitempty"`
+	OpenAIMaxTokens int `json:"openai_max_tokens,omitempty"`
+}
+
+type configFile struct {
+	Configurations       map[string]json.RawMessage `json:"configurations"`
+	DefaultConfiguration string                     `json:"default_configuration"`
+	Config
 }
 
 func getConfigPath() string {
@@ -39,33 +49,71 @@ func getConfigPath() string {
 	return "config.json"
 }
 
-// loadJSONConfig reads configuration from a config.json file if it exists.
-func loadJSONConfig() (Config, bool) {
-	var cfg Config
+// loadJSONConfigFile reads configuration from a config.json file if it exists.
+func loadJSONConfigFile() (configFile, bool) {
+	var file configFile
 	configPath := getConfigPath()
-	file, err := os.Open(configPath)
+	f, err := os.Open(configPath)
 	if err != nil {
 		if configPath != "config.json" {
-			file, err = os.Open("config.json")
+			f, err = os.Open("config.json")
 		}
 	}
 	if err != nil {
-		return cfg, false
+		return file, false
 	}
-	defer file.Close()
+	defer f.Close()
 
-	err = json.NewDecoder(file).Decode(&cfg)
+	err = json.NewDecoder(f).Decode(&file)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to parse config file: %v\n", err)
-		return cfg, false
+		return file, false
 	}
-	return cfg, true
+	return file, true
 }
 
-
-func LoadConfig() (Config, error) {
+func LoadConfig(configName ...string) (Config, error) {
 	// 1. Start with values from config.json (if present)
-	cfg, _ := loadJSONConfig()
+	var cfg Config
+	var activeName string
+
+	file, ok := loadJSONConfigFile()
+	if ok {
+		var selectedName string
+		if len(configName) > 0 && configName[0] != "" {
+			selectedName = configName[0]
+		} else if file.DefaultConfiguration != "" {
+			selectedName = file.DefaultConfiguration
+		}
+
+		if selectedName != "" {
+			raw, found := file.Configurations[selectedName]
+			if !found {
+				// Get list of valid configuration names for a better error message
+				var names []string
+				for k := range file.Configurations {
+					names = append(names, k)
+				}
+				sort.Strings(names)
+				if len(names) > 0 {
+					return Config{}, fmt.Errorf("configuration %q not found. Available configurations: %s", selectedName, strings.Join(names, ", "))
+				}
+				return Config{}, fmt.Errorf("configuration %q not found (no configurations defined in file)", selectedName)
+			}
+
+			// Start with root config
+			cfg = file.Config
+			// Unmarshal named configuration on top of it to override fields
+			if err := json.Unmarshal(raw, &cfg); err != nil {
+				return Config{}, fmt.Errorf("failed to parse configuration %q: %w", selectedName, err)
+			}
+			activeName = selectedName
+		} else {
+			cfg = file.Config
+		}
+	}
+
+	cfg.ActiveConfigName = activeName
 
 	// 2. Override with system environment variables (highest precedence)
 	overrideFromEnv := func(target *string, envKey string) {
@@ -76,6 +124,7 @@ func LoadConfig() (Config, error) {
 
 	overrideFromEnv(&cfg.QdrantURL, "QDRANT_URL")
 	overrideFromEnv(&cfg.QdrantAPIKey, "QDRANT_API_KEY")
+	overrideFromEnv(&cfg.QdrantVectorName, "QDRANT_VECTOR_NAME")
 	overrideFromEnv(&cfg.EmbeddingURL, "EMBEDDING_URL")
 	overrideFromEnv(&cfg.EmbeddingAPIKey, "EMBEDDING_API_KEY")
 	overrideFromEnv(&cfg.EmbeddingModel, "EMBEDDING_MODEL")
@@ -106,17 +155,27 @@ func LoadConfig() (Config, error) {
 			cfg.HTTPTimeoutSeconds = n
 		}
 	}
+	if val := os.Getenv("OPENAI_MAX_TOKENS"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n >= 0 {
+			cfg.OpenAIMaxTokens = n
+		}
+	}
+
+	// Apply CLI overrides if explicitly set (highest precedence)
+	if cliSearchCap >= 0 {
+		cfg.SearchCap = cliSearchCap
+	}
+	if cliSafe || os.Getenv("QQUESTIO_SKILLS_REQUIRE_CONFIRM") == "1" {
+		cfg.SkillsRequireConfirm = true
+	}
 
 	// Apply defaults
 	if cfg.HTTPTimeoutSeconds <= 0 {
 		cfg.HTTPTimeoutSeconds = 60
 	}
 
-	// Apply the default context limit when neither JSON nor env configured it.
-	// CONTEXT_LIMIT=0 (or context_limit: 0 in JSON) explicitly disables auto-compact.
-	if cfg.ContextLimit == 0 && os.Getenv("CONTEXT_LIMIT") == "" {
-		cfg.ContextLimit = 131072
-	}
+	// Default ContextLimit and OpenAIMaxTokens to 0 (disabled/no limit) when not explicitly set.
+	// Users can define them in config.json or environment variables if they want specific limits.
 
 	// 3. Validate and construct super-clear error message if variables are missing
 	var missing []string
@@ -191,4 +250,17 @@ func LoadConfig() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func GetAvailableConfigs() ([]string, string, error) {
+	file, ok := loadJSONConfigFile()
+	if !ok {
+		return nil, "", fmt.Errorf("could not load config file")
+	}
+	var names []string
+	for k := range file.Configurations {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names, file.DefaultConfiguration, nil
 }

@@ -11,7 +11,14 @@ var HTTPTimeout = 60 * time.Second
 
 // newHTTPClient creates an HTTP client with the specified timeout.
 func newHTTPClient(timeout time.Duration) *http.Client {
+	transport, ok := http.DefaultTransport.(*http.Transport)
+	var customTransport *http.Transport
+	if ok {
+		customTransport = transport.Clone()
+		customTransport.ResponseHeaderTimeout = 30 * time.Second
+	}
 	return &http.Client{
-		Timeout: timeout,
+		Timeout:   timeout,
+		Transport: customTransport,
 	}
 }

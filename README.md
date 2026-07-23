@@ -84,12 +84,13 @@ QQuestio supports three configuration methods. Values are merged with the follow
 | `OPENAI_URL` / `openai_url` | Base URL of the OpenAI-compatible API | Yes | `http://localhost:4000` |
 | `OPENAI_API_KEY` / `openai_api_key` | Optional API Key for the OpenAI-compatible endpoint | No | `your-openai-key` |
 | `OPENAI_MODEL` / `openai_model` | LLM model name | Yes | `meta-llama/Llama-3-8B-Instruct` |
+| `OPENAI_MAX_TOKENS` / `openai_max_tokens` | Optional maximum completion token count (defaults to `0` for no limit/omit payload) | No | `0` |
 | `DEFAULT_COLLECTION` / `default_collection` | Starting Qdrant vector database collection | Yes | `documentation` |
 | `RERANKER_URL` / `reranker_url` | Base URL of the model-agnostic rerank endpoint | No | `http://localhost:8080/rerank` |
 | `RERANKER_API_KEY` / `reranker_api_key` | Optional API Key for the reranker endpoint | No | `your-reranker-key` |
 | `RERANKER_MODEL` / `reranker_model` | Optional model name for the rerank endpoint | No | `bge-reranker-large` |
 | `SEARCH_CAP` / `search_cap` / `--search-cap` | Optional upper bound on the Qdrant search candidate pool. `0` (default) = no cap, search the full corpus. See [Search Scope vs. Return Count](#-search-scope-vs-return-count) below. | No | `50000` |
-| `CONTEXT_LIMIT` / `context_limit` | Maximum token limit (4-chars ≈ 1 token heuristic). Auto-compaction triggers at 85%. Default is `131072`. Set to `0` to disable auto-compaction. | No | `131072` |
+| `CONTEXT_LIMIT` / `context_limit` | Maximum token limit (4-chars ≈ 1 token heuristic). Auto-compaction triggers at 85%. Defaults to `0` (disabled/no limit). | No | `0` |
 | `QQUESTIO_HTTP_TIMEOUT` / `http_timeout_seconds` | Request timeout in seconds for all external API calls (defaults to 60s). | No | `60` |
 | `QQUESTIO_SKILLS_REQUIRE_CONFIRM` / `skills_require_confirm` / `--safe` | Gating safety check that requires user verification prior to running any local tools/skills (defaults to false). | No | `true` |
 
@@ -104,6 +105,7 @@ QQuestio supports three configuration methods. Values are merged with the follow
   "openai_url": "http://localhost:4000",
   "openai_api_key": "your-openai-key",
   "openai_model": "llama3",
+  "openai_max_tokens": 16384,
   "default_collection": "documents",
   "reranker_url": "http://localhost:8080/rerank",
   "reranker_api_key": "your-reranker-key",
@@ -117,6 +119,55 @@ QQuestio supports three configuration methods. Values are merged with the follow
 
 > `search_cap` is optional. `0` (or omitted) means **no cap** — QQuestio will search the entire collection before truncating to the requested number of documents.
 
+### 2. Multi-Profile Configurations
+You can define multiple named configuration profiles inside a `"configurations"` block in your `config.json`. This allows you to configure completely different databases, models, endpoints, timeouts, and collections, and easily switch between them.
+
+All configurations inherit from the top-level (root) configuration fields. You only need to define the keys you want to override for that specific profile.
+
+#### Example Multi-Profile `config.json`
+```json
+{
+  "qdrant_url": "http://localhost:6333",
+  "qdrant_api_key": "local-key",
+  "embedding_url": "http://localhost:8080",
+  "embedding_model": "nomic-embed",
+  "openai_url": "http://localhost:4000",
+  "openai_model": "llama3",
+  "default_collection": "documents",
+
+  "default_configuration": "dev",
+
+  "configurations": {
+    "dev": {
+      "default_collection": "dev-docs",
+      "openai_model": "llama3-dev"
+    },
+    "production": {
+      "qdrant_url": "https://production-db.qdrant.io:6333",
+      "qdrant_api_key": "prod-secret-key",
+      "default_collection": "prod-docs",
+      "openai_url": "https://api.openai.com/v1",
+      "openai_api_key": "your-openai-api-key",
+      "openai_model": "gpt-4o"
+    }
+  }
+}
+```
+
+#### Switching Configurations
+- **From CLI:** Start QQuestio using a specific profile name with the `--conf` flag:
+  ```bash
+  ./qquestio --conf production
+  ```
+- **At Runtime:** Switch configuration profiles instantly inside the terminal UI chat input using the `/conf` command:
+  ```text
+  /conf production
+  ```
+- **List Profiles:** Running `/conf` without arguments lists the active configuration and all available configuration profiles:
+  ```text
+  /conf
+  ```
+
 ---
 
 ## 💬 Interactive Slash Commands
@@ -124,6 +175,7 @@ QQuestio supports three configuration methods. Values are merged with the follow
 Change state parameters or trigger clipboard actions at runtime from the prompt input:
 
 - **`/collection <name>`**: Switches the active vector store collection instantly.
+- **`/conf [name]`**: Views the active config profile and all available configuration profiles, or switches to a different profile at runtime (e.g. `/conf production`).
 - **`/limit <1-100>`**: Sets the number of context documents (`docs`) to RETRIEVE into the prompt. This is the return-count side of the search; see [Search Scope vs. Return Count](#-search-scope-vs-return-count).
 - **`/cap [N|off|auto|exact|local]`**: Controls the candidate pool cap and search mode. `/cap 50000` → HNSW approximate top-50k; `/cap off` → no cap, uses Qdrant native brute-force (default); `/cap auto` → let the runtime decide; `/cap exact` → always force server-side brute-force (max Qdrant CPU usage); `/cap local` → force client-side brute-force on all local CPU cores (fallback). `/cap` alone prints the current cap and mode. See [Search Scope vs. Return Count](#-search-scope-vs-return-count).
 - **`/filter <key> <value>`** (or **`/filter clear`**): Filters vector search by exact metadata key-value match (e.g. `/filter file_name guide.txt`).

@@ -105,14 +105,38 @@ func (f *fakeQdrant) serveSearch(w http.ResponseWriter, r *http.Request) {
 		matches = applyServerFilter(matches, req.Filter)
 	}
 
-	// Compute cosine similarity to req.Vector.
+	var queryVector []float32
+	switch v := req.Vector.(type) {
+	case []float32:
+		queryVector = v
+	case []interface{}:
+		queryVector = make([]float32, len(v))
+		for idx, val := range v {
+			if f, ok := val.(float64); ok {
+				queryVector[idx] = float32(f)
+			}
+		}
+	case map[string]interface{}:
+		if vecVal, ok := v["vector"]; ok {
+			if vecSlice, ok := vecVal.([]interface{}); ok {
+				queryVector = make([]float32, len(vecSlice))
+				for idx, val := range vecSlice {
+					if f, ok := val.(float64); ok {
+						queryVector[idx] = float32(f)
+					}
+				}
+			}
+		}
+	}
+
+	// Compute cosine similarity to queryVector.
 	type scored struct {
 		point QdrantPoint
 		score float32
 	}
 	scoredAll := make([]scored, 0, len(matches))
 	for _, p := range matches {
-		scoredAll = append(scoredAll, scored{point: p, score: cosine(req.Vector, p.Vector)})
+		scoredAll = append(scoredAll, scored{point: p, score: cosine(queryVector, p.Vector)})
 	}
 	sort.SliceStable(scoredAll, func(i, j int) bool {
 		return scoredAll[i].score > scoredAll[j].score
@@ -515,7 +539,7 @@ func TestQdrantRangeSerialization(t *testing.T) {
 	hi := 7.0
 	f := &QdrantFilter{
 		Must: []QdrantFieldCondition{
-			{Key: "file_name", Match: QdrantMatch{Value: "doc5.txt"}},
+			{Key: "file_name", Match: &QdrantMatch{Value: "doc5.txt"}},
 			{Key: "chunk_index", Range: &QdrantRange{Gte: &lo, Lte: &hi}},
 		},
 	}
