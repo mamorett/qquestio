@@ -132,17 +132,23 @@ type Model struct {
 }
 
 // estimateContextTokens returns a rough token count of what is ACTUALLY sent
-// to the LLM: turn content (Q&A text) + the current query's retrieved chunks.
-// Does NOT count stored References from past turns because those are no longer
-// injected into the LLM prompt (they live only in the references panel).
+// to the LLM: turn content (Q&A text), the text of previously retrieved context
+// chunks injected into history turns, and the current query's retrieved chunks.
 func (m *Model) estimateContextTokens() int {
 	total := 0
-	for _, turn := range m.history {
+	for i, turn := range m.history {
 		total += len(turn.Content) / 4
+		if turn.Role == "user" {
+			if i+1 < len(m.history) && m.history[i+1].Role == "assistant" {
+				for _, pt := range m.history[i+1].References {
+					total += len(pt.ExtractText()) / 4
+				}
+			}
+		}
 	}
 	// Count the current query's retrieved context (not yet in history)
 	for _, pt := range m.lastPoints {
-		total += len(pt.ExtractPrimaryText()) / 4
+		total += len(pt.ExtractText()) / 4
 	}
 	return total
 }
@@ -765,7 +771,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cfg.RerankerURL != "" {
 			headerH = 5
 		}
-		footerH := 3
+		footerH := 1
 		if msg.Y >= headerH && msg.Y < m.height-footerH {
 			refWidth := m.width / 3
 			if refWidth < 20 {
@@ -810,10 +816,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.state == stateStreaming || m.state == stateIdle || m.state == stateError {
 		var shouldForward = true
-		if keyMsg, ok := msg.(tea.KeyMsg); ok {
-			if keyMsg.Type == tea.KeyUp || keyMsg.Type == tea.KeyDown {
-				shouldForward = false
-			}
+		if _, isKey := msg.(tea.KeyMsg); isKey {
+			shouldForward = false
 		}
 		if shouldForward {
 			var vpCmd tea.Cmd
@@ -1116,48 +1120,57 @@ func (m *Model) renderHeader() string {
 }
 
 func (m *Model) renderFooter() string {
+	targetWidth := m.width - 1
+	if targetWidth < 10 {
+		targetWidth = 10
+	}
+
+	var footerText string
+
 	// Quit confirmation bar replaces the normal footer.
 	if m.state == stateConfirmQuit {
 		confirmText := " ⚠  Exit QQuestio?  Press Ctrl+C or Y to confirm  ·  Esc or N to cancel "
-		padding := m.width - lipgloss.Width(confirmText)
+		padding := targetWidth - lipgloss.Width(confirmText)
 		if padding > 0 {
 			confirmText += strings.Repeat(" ", padding)
 		}
-		return lipgloss.NewStyle().
+		footerText = lipgloss.NewStyle().
 			Foreground(nord6).
 			Background(nord11).
 			Bold(true).
 			Render(confirmText)
-	}
-	if m.state == stateConfirmSkill {
+	} else if m.state == stateConfirmSkill {
 		argsPreview := strings.ReplaceAll(m.pendingSkillArgs, "\n", " ")
 		if len(argsPreview) > 30 {
 			argsPreview = argsPreview[:27] + "..."
 		}
 		confirmText := fmt.Sprintf(" ⚠  Allow skill execution: '%s %s'?  [Y] Allow once  [A] Allow always  [N] Deny ", m.pendingSkillName, argsPreview)
-		if lipgloss.Width(confirmText) > m.width && m.width > 20 {
-			confirmText = confirmText[:m.width-4] + "... "
+		if lipgloss.Width(confirmText) > targetWidth && targetWidth > 20 {
+			confirmText = confirmText[:targetWidth-4] + "... "
 		}
-		padding := m.width - lipgloss.Width(confirmText)
+		padding := targetWidth - lipgloss.Width(confirmText)
 		if padding > 0 {
 			confirmText += strings.Repeat(" ", padding)
 		}
-		return lipgloss.NewStyle().
+		footerText = lipgloss.NewStyle().
 			Foreground(nord0).
 			Background(nord13).
 			Bold(true).
 			Render(confirmText)
-	}
-	styles := DefaultStyles()
-	inputView := m.textInput.View()
-	footerText := " " + inputView
+	} else {
+		styles := DefaultStyles()
+		inputView := m.textInput.View()
+		text := " " + inputView
 
-	// Pad footer to the width of the window
-	padding := m.width - lipgloss.Width(footerText)
-	if padding > 0 {
-		footerText += strings.Repeat(" ", padding)
+		// Pad footer to targetWidth
+		padding := targetWidth - lipgloss.Width(text)
+		if padding > 0 {
+			text += strings.Repeat(" ", padding)
+		}
+		footerText = styles.Footer.Render(text)
 	}
-	return styles.Footer.Render(footerText)
+
+	return footerText
 }
 
 // getRenderedTurn renders (or retrieves from cache) the markdown content of an assistant turn.
@@ -1239,7 +1252,7 @@ func (m *Model) recalcLayout() {
 	if m.cacheInfo != "" && currentFilter != m.cacheFilterAtWarmup {
 		headerH++
 	}
-	footerH := 3
+	footerH := 1
 
 	refWidth := m.width / 3
 	if refWidth < 20 {
@@ -1262,7 +1275,11 @@ func (m *Model) recalcLayout() {
 	m.refViewport.Width = refWidth - 2
 	m.refViewport.Height = viewportHeight
 
-	m.textInput.Width = m.width - 4
+	tiWidth := m.width - 6
+	if tiWidth < 10 {
+		tiWidth = 10
+	}
+	m.textInput.Width = tiWidth
 }
 
 // updateViewport constructs and renders the conversation history in the viewport.

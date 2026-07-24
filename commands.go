@@ -487,36 +487,35 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 	msgs = append(msgs, rag.ChatMessage{Role: "system", Content: system})
 
 	// 2. Conversation history (multi-turn)
-	// Past turns are sent as clean Q&A pairs WITHOUT re-injecting the full
-	// retrieved chunks, which bloats the context.
-	// However, to support follow-up questions like "tell me more about that doc",
-	// we inject a lightweight summary of the IMMEDIATELY PRECEDING turn's references.
+	// For each past user turn, we look up the references from the subsequent assistant turn
+	// (if available) and format them back into the query context, so the LLM remembers
+	// the retrieved context that was present during those turns.
 	for i := 0; i < len(m.history); i++ {
 		turn := m.history[i]
 		if turn.Role == "user" {
-			userMsg := "Question: " + turn.Content
-			
-			// If this is the VERY LAST user turn in history, and the subsequent
-			// assistant turn had references, inject a short hint.
-			if i == len(m.history)-2 && m.history[i+1].Role == "assistant" {
-				pastRefs := m.history[i+1].References
-				if len(pastRefs) > 0 {
-					var hint strings.Builder
-					hint.WriteString("\n[Hint: For context, the assistant's previous answer referenced these documents: ")
-					for idx, pt := range pastRefs {
-						docName := extractDocumentName(pt.Payload)
-						if docName == "" {
-							docName = fmt.Sprintf("ID %v", pt.ID)
-						}
-						hint.WriteString(docName)
-						if idx < len(pastRefs)-1 {
-							hint.WriteString(", ")
-						}
-					}
-					hint.WriteString("]")
-					userMsg += hint.String()
-				}
+			var contextBuilder strings.Builder
+			var turnRefs []rag.QdrantPoint
+			if i+1 < len(m.history) && m.history[i+1].Role == "assistant" {
+				turnRefs = m.history[i+1].References
 			}
+
+			if len(turnRefs) > 0 {
+				contextBuilder.WriteString("Retrieved Context Chunks from Knowledge Base:\n")
+				for idx, pt := range turnRefs {
+					source := extractDocumentName(pt.Payload)
+					textStr := pt.ExtractText()
+					pointIDStr := fmt.Sprintf("%v", pt.ID)
+
+					docName := source
+					if docName == "" {
+						docName = fmt.Sprintf("ID %s", pointIDStr)
+					}
+					contextBuilder.WriteString(fmt.Sprintf("--- Chunk %d | Document: %s ---\n%s\n", idx+1, docName, textStr))
+				}
+				contextBuilder.WriteString("---\n\n")
+			}
+
+			userMsg := fmt.Sprintf("%sQuestion: %s", contextBuilder.String(), turn.Content)
 			msgs = append(msgs, rag.ChatMessage{Role: "user", Content: userMsg})
 		} else if turn.Role == "assistant" {
 			msgs = append(msgs, rag.ChatMessage{Role: "assistant", Content: turn.Content})

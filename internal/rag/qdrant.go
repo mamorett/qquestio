@@ -1946,7 +1946,10 @@ func scrollWithFilter(
 		resp.Body.Close()
 
 		all = append(all, scrollResp.Result.Points...)
-
+		if scrollResp.Result.NextPageOffset == nil {
+			break
+		}
+		offset = scrollResp.Result.NextPageOffset
 	}
 	return all, nil
 }

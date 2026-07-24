@@ -302,7 +302,7 @@ func applyServerFilter(points []QdrantPoint, f *QdrantFilter) []QdrantPoint {
 	docVal := ""
 	lo, hi := -1<<31, 1<<31-1
 	for _, c := range f.Must {
-		if c.Match.Value != nil {
+		if c.Match != nil && c.Match.Value != nil {
 			if s, ok := c.Match.Value.(string); ok {
 				docKey = c.Key
 				docVal = s

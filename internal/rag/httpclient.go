@@ -2,6 +2,8 @@ package rag
 
 import (
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -15,8 +17,25 @@ func newHTTPClient(timeout time.Duration) *http.Client {
 	var customTransport *http.Transport
 	if ok {
 		customTransport = transport.Clone()
-		customTransport.ResponseHeaderTimeout = 30 * time.Second
+	} else {
+		customTransport = &http.Transport{}
 	}
+	customTransport.ResponseHeaderTimeout = 30 * time.Second
+
+	// Wrap the proxy function to bypass proxies for loopback/localhost.
+	// This prevents tests and local endpoints from hanging in proxy environments.
+	originalProxy := customTransport.Proxy
+	if originalProxy == nil {
+		originalProxy = http.ProxyFromEnvironment
+	}
+	customTransport.Proxy = func(req *http.Request) (*url.URL, error) {
+		host := req.URL.Hostname()
+		if host == "localhost" || host == "127.0.0.1" || host == "::1" || strings.HasPrefix(host, "127.") {
+			return nil, nil
+		}
+		return originalProxy(req)
+	}
+
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: customTransport,

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,7 +124,7 @@ func parseCacheBytes(collection string, data []byte) (*CorpusCache, []QdrantPoin
 		return nil, nil, fmt.Errorf("cache: failed to read name length: %w", err)
 	}
 	nameBytes := make([]byte, nameLen)
-	if _, err := r.Read(nameBytes); err != nil {
+	if _, err := io.ReadFull(r, nameBytes); err != nil {
 		return nil, nil, fmt.Errorf("cache: failed to read name: %w", err)
 	}
 	cachedCollection := string(nameBytes)
@@ -141,12 +142,25 @@ func parseCacheBytes(collection string, data []byte) (*CorpusCache, []QdrantPoin
 		return nil, nil, fmt.Errorf("cache: failed to read point count: %w", err)
 	}
 
+	var filterAtWarmup string
+	if version >= 2 {
+		var filterLen uint32
+		if err := binary.Read(r, binary.LittleEndian, &filterLen); err != nil {
+			return nil, nil, fmt.Errorf("cache: failed to read filter length: %w", err)
+		}
+		filterBytes := make([]byte, filterLen)
+		if _, err := io.ReadFull(r, filterBytes); err != nil {
+			return nil, nil, fmt.Errorf("cache: failed to read filter string: %w", err)
+		}
+		filterAtWarmup = string(filterBytes)
+	}
+
 	var payloadLen uint32
 	if err := binary.Read(r, binary.LittleEndian, &payloadLen); err != nil {
 		return nil, nil, fmt.Errorf("cache: failed to read payload length: %w", err)
 	}
 	payloadBytes := make([]byte, payloadLen)
-	if _, err := r.Read(payloadBytes); err != nil {
+	if _, err := io.ReadFull(r, payloadBytes); err != nil {
 		return nil, nil, fmt.Errorf("cache: failed to read payload blob: %w", err)
 	}
 
@@ -166,7 +180,7 @@ func parseCacheBytes(collection string, data []byte) (*CorpusCache, []QdrantPoin
 			return nil, nil, fmt.Errorf("cache: failed to read id length for point %d: %w", i, err)
 		}
 		idBytes := make([]byte, idLen)
-		if _, err := r.Read(idBytes); err != nil {
+		if _, err := io.ReadFull(r, idBytes); err != nil {
 			return nil, nil, fmt.Errorf("cache: failed to read id for point %d: %w", i, err)
 		}
 		// IDs can be ints, UUIDs, or strings; store as interface{} via JSON round-trip
@@ -185,7 +199,7 @@ func parseCacheBytes(collection string, data []byte) (*CorpusCache, []QdrantPoin
 			return nil, nil, fmt.Errorf("cache: vector byte length %d != expected %d (dim=%d) for point %d", vecLen, expectedVecBytes, dim, i)
 		}
 		vecBytes := make([]byte, vecLen)
-		if _, err := r.Read(vecBytes); err != nil {
+		if _, err := io.ReadFull(r, vecBytes); err != nil {
 			return nil, nil, fmt.Errorf("cache: failed to read vector for point %d: %w", i, err)
 		}
 		// Decode little-endian float32 vector.
@@ -202,19 +216,6 @@ func parseCacheBytes(collection string, data []byte) (*CorpusCache, []QdrantPoin
 			// Score is meaningless for a cache hit; we will recompute it.
 			Score: 0,
 		})
-	}
-
-	var filterAtWarmup string
-	if version >= 2 {
-		var filterLen uint32
-		if err := binary.Read(r, binary.LittleEndian, &filterLen); err != nil {
-			return nil, nil, fmt.Errorf("cache: failed to read filter length: %w", err)
-		}
-		filterBytes := make([]byte, filterLen)
-		if _, err := r.Read(filterBytes); err != nil {
-			return nil, nil, fmt.Errorf("cache: failed to read filter string: %w", err)
-		}
-		filterAtWarmup = string(filterBytes)
 	}
 
 	cache := &CorpusCache{
