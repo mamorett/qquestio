@@ -1000,7 +1000,7 @@ func (m *Model) renderHeader() string {
 		dbStatusDisp = " " + lipgloss.NewStyle().Foreground(nord14).Render("(✓)")
 	}
 
-	qdrantInfo := fmt.Sprintf(" %s %s%s  %s  %s %s  %s %s %d  %s  %s %s  %s  %s %s  %s  %s %s  %s  %s %s%s%s",
+	qdrantInfo := fmt.Sprintf(" %s %s%s  %s  %s %s  %s %s %d  %s  %s %s  %s  %s %s  %s  %s %s  %s  %s %s  %s  %s %s%s%s",
 		labelStyle.Render("DB:"), valueStyle.Render(m.cfg.QdrantURL), dbStatusDisp,
 		delimStyle.Render("│"),
 		labelStyle.Render("Col:"), valueStyle.Render(m.collection),
@@ -1011,9 +1011,11 @@ func (m *Model) renderHeader() string {
 		delimStyle.Render("│"),
 		labelStyle.Render("Cap:"), valueStyle.Render(capText),
 		delimStyle.Render("│"),
+		labelStyle.Render("Search:"), valueStyle.Render(m.searchMode),
+		delimStyle.Render("│"),
 		labelStyle.Render("Cache:"), valueStyle.Render(cacheText),
 		delimStyle.Render("│"),
-		labelStyle.Render("Mode:"), modeView,
+		labelStyle.Render("RAG:"), modeView,
 		contextStr,
 		statsStr,
 	)

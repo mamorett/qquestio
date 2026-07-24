@@ -428,6 +428,7 @@ func TestSearchWithContextExpansion(t *testing.T) {
 		query,
 		limit, expand,
 		"", "",
+		true,
 	)
 	if err != nil {
 		t.Fatalf("SearchWithContextExpansionDetailed returned error: %v", err)
@@ -485,6 +486,7 @@ func TestSearchWithContextExpansionExpandOff(t *testing.T) {
 		query,
 		limit, expand,
 		"", "",
+		true,
 	)
 	if err != nil {
 		t.Fatalf("SearchWithContextExpansionDetailed returned error: %v", err)
@@ -520,6 +522,7 @@ func TestSearchWithContextExpansionEmptyCorpus(t *testing.T) {
 		query,
 		5, 1,
 		"", "",
+		true,
 	)
 	if err != nil {
 		t.Fatalf("SearchWithContextExpansionDetailed on empty corpus returned error: %v", err)
@@ -580,6 +583,7 @@ func TestSearchWithContextExpansionDetailed(t *testing.T) {
 		1, // limit: 1 primary top match
 		1, // expand: ±1
 		"", "",
+		true,
 	)
 	if err != nil {
 		t.Fatalf("SearchWithContextExpansionDetailed error: %v", err)

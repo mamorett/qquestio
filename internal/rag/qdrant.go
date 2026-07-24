@@ -1112,6 +1112,7 @@ func SearchWithContextExpansionDetailed(
 	vector []float32,
 	limit, expand int,
 	filterKey, filterValue string,
+	exact bool,
 ) (ContextExpansionResult, error) {
 	res := ContextExpansionResult{
 		ExpansionMap: ExpansionMap{},
@@ -1124,7 +1125,7 @@ func SearchWithContextExpansionDetailed(
 	}
 
 	// Phase 1: full-corpus exact search for top-N chunks.
-	primaryContext, primaryPoints, err := exactSearchWithPoints(ctx, baseURL, apiKey, collection, vector, limit, filterKey, filterValue)
+	primaryContext, primaryPoints, err := exactSearchWithPoints(ctx, baseURL, apiKey, collection, vector, limit, filterKey, filterValue, exact)
 	if err != nil {
 		return res, fmt.Errorf("primary exact search failed: %w", err)
 	}
@@ -1464,6 +1465,7 @@ func exactSearchWithPoints(
 	vector []float32,
 	docs int,
 	filterKey, filterValue string,
+	exact bool,
 ) (string, []QdrantPoint, error) {
 	url := fmt.Sprintf("%s/collections/%s/points/search",
 		strings.TrimSuffix(baseURL, "/"), collection)
@@ -1481,12 +1483,17 @@ func exactSearchWithPoints(
 		}
 	}
 
+	var params *QdrantSearchParams
+	if exact {
+		params = &QdrantSearchParams{Exact: true}
+	}
+
 	reqBody := QdrantSearchRequest{
 		Vector:      vecParam,
 		Filter:      filter,
 		Limit:       docs,
 		WithPayload: true,
-		Params:      &QdrantSearchParams{Exact: true},
+		Params:      params,
 	}
 
 	jsonData, err := json.Marshal(reqBody)

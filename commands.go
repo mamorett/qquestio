@@ -32,16 +32,20 @@ func (m *Model) computeSearchDocs(docs, expand int) int {
 		expand = 0
 	}
 
+	// If no reranker is configured/enabled, the search limit is exactly the user's limit.
+	// We do not need a larger candidate pool because there is no second-stage reranking.
+	if m.cfg.RerankerURL == "" || m.disableReranker {
+		return docs
+	}
+
 	// Compute the base candidate pool size before expansion scaling.
 	basePool := docs
-	if m.cfg.RerankerURL != "" && !m.disableReranker {
-		if m.rerankerPool > 0 {
-			basePool = m.rerankerPool
-		} else {
-			basePool = docs * 5
-			if basePool < 50 {
-				basePool = 50
-			}
+	if m.rerankerPool > 0 {
+		basePool = m.rerankerPool
+	} else {
+		basePool = docs * 5
+		if basePool < 50 {
+			basePool = 50
 		}
 	}
 
@@ -177,7 +181,7 @@ func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 			return searchResultMsg{context: results, points: points, primaryPoints: points, expansionMap: rag.ExpansionMap{}, expand: 0}
 		}
 
-		// DEFAULT no-cap path: full-corpus exact search + context expansion.
+		// DEFAULT no-cap path: full-corpus search + context expansion.
 		// We use the detailed version so the rerank step can rerank only
 		// the primary top-N (not the already-expanded set) and re-apply
 		// ±expand around the reranked top-K.
@@ -186,6 +190,7 @@ func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 			m.collection, vector,
 			searchDocs, expand,
 			m.filterKey, m.filterValue,
+			m.searchMode == "exact",
 		)
 		if err != nil {
 			return appErrMsg{err: err, reason: "Qdrant context-expanded search failed", stage: "search"}

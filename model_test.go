@@ -150,13 +150,13 @@ func TestComputeSearchDocs(t *testing.T) {
 	if got := m.computeSearchDocs(10, 0); got != 10 {
 		t.Errorf("Reranker disabled: expected 10, got %d", got)
 	}
-	// docs = 10, expand = 1 -> 10 * (1 + 1) = 20
-	if got := m.computeSearchDocs(10, 1); got != 20 {
-		t.Errorf("Reranker disabled with expand=1: expected 20, got %d", got)
+	// docs = 10, expand = 1 -> 10
+	if got := m.computeSearchDocs(10, 1); got != 10 {
+		t.Errorf("Reranker disabled with expand=1: expected 10, got %d", got)
 	}
-	// docs = 10, expand = 100 -> 500 (capped)
-	if got := m.computeSearchDocs(10, 100); got != 500 {
-		t.Errorf("Reranker disabled with expand=100 (cap): expected 500, got %d", got)
+	// docs = 10, expand = 100 -> 10
+	if got := m.computeSearchDocs(10, 100); got != 10 {
+		t.Errorf("Reranker disabled with expand=100 (cap): expected 10, got %d", got)
 	}
 
 	// Case 2: Reranker enabled, URL set, default rerankerPool (0 = auto)
