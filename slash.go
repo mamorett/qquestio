@@ -129,6 +129,28 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 			}
 			m.ragMode = newMode
 			return slashResultMsg{feedback: fmt.Sprintf("RAG mode → %s", newMode)}
+		case "/search":
+			if len(args) == 0 {
+				return slashResultMsg{feedback: fmt.Sprintf("Search mode → %s", m.searchMode)}
+			}
+			arg := strings.ToLower(strings.TrimSpace(args[0]))
+			switch arg {
+			case "auto":
+				m.searchMode = "auto"
+				return slashResultMsg{feedback: "Search mode → auto (HNSW vector search when cap > 0, exact search when cap = 0)"}
+			case "exact":
+				m.searchMode = "exact"
+				return slashResultMsg{feedback: "Search mode → exact (forces server-side brute-force exact search — maximum precision, slower)"}
+			case "local":
+				m.searchMode = "local"
+				return slashResultMsg{feedback: "Search mode → local (client-side brute-force search using local corpus cache)"}
+			default:
+				return appErrMsg{
+					err:    fmt.Errorf("/search must be 'auto', 'exact', or 'local'"),
+					reason: "Usage: /search <auto|exact|local>",
+					stage:  "slash",
+				}
+			}
 
 		case "/filter":
 			if len(args) == 0 || args[0] == "clear" {
@@ -472,6 +494,7 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				"  /limit <1-100>      - Set the number of context documents to retrieve\n" +
 				"  /expand <N|off>     - ±N adjacent chunks from the same doc per match (0=off, 1=default)\n" +
 				"  /cap [N|off]        - Set/clear the candidate pool cap (0/no cap = full corpus)\n" +
+				"  /search <auto|exact|local> - Set vector search mode (auto = HNSW, exact = server brute force, local = cache)\n" +
 				"  /cache [status|refresh|warmup|clear|dir] - Inspect or control the on-disk corpus cache\n" +
 				"  /filter [key] <val> - Filter search (e.g. '/filter file_name guide.txt' or '/filter guide.txt')\n" +
 				"  /rerank <on|off>    - Enable/disable the reranker step\n" +

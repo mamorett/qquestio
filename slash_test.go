@@ -183,6 +183,66 @@ func TestHandleSlashCmd_Mode(t *testing.T) {
 	}
 }
 
+func TestHandleSlashCmd_Search(t *testing.T) {
+	cfg := Config{DefaultCollection: "default"}
+	m := NewModel(context.Background(), cfg)
+
+	// Default searchMode is auto
+	if m.searchMode != "auto" {
+		t.Errorf("expected default searchMode to be auto, got %s", m.searchMode)
+	}
+
+	// Switch to exact
+	cmdExact := m.handleSlashCmd("/search exact")
+	msgExact := cmdExact()
+	resExact, ok := msgExact.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msgExact)
+	}
+	if !strings.Contains(resExact.feedback, "Search mode → exact") {
+		t.Errorf("unexpected feedback: %s", resExact.feedback)
+	}
+	if m.searchMode != "exact" {
+		t.Errorf("expected searchMode to be exact, got %s", m.searchMode)
+	}
+
+	// Switch to local
+	cmdLocal := m.handleSlashCmd("/search local")
+	msgLocal := cmdLocal()
+	resLocal, ok := msgLocal.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msgLocal)
+	}
+	if !strings.Contains(resLocal.feedback, "Search mode → local") {
+		t.Errorf("unexpected feedback: %s", resLocal.feedback)
+	}
+	if m.searchMode != "local" {
+		t.Errorf("expected searchMode to be local, got %s", m.searchMode)
+	}
+
+	// Switch back to auto
+	cmdAuto := m.handleSlashCmd("/search auto")
+	msgAuto := cmdAuto()
+	resAuto, ok := msgAuto.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msgAuto)
+	}
+	if !strings.Contains(resAuto.feedback, "Search mode → auto") {
+		t.Errorf("unexpected feedback: %s", resAuto.feedback)
+	}
+	if m.searchMode != "auto" {
+		t.Errorf("expected searchMode to be auto, got %s", m.searchMode)
+	}
+
+	// Invalid search mode
+	cmdInvalid := m.handleSlashCmd("/search invalid")
+	msgInvalid := cmdInvalid()
+	_, isErr := msgInvalid.(appErrMsg)
+	if !isErr {
+		t.Fatalf("expected appErrMsg for invalid search mode, got %T", msgInvalid)
+	}
+}
+
 func TestHandleSlashCmd_Filter(t *testing.T) {
 	cfg := Config{DefaultCollection: "default"}
 	m := NewModel(context.Background(), cfg)
