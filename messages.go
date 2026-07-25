@@ -36,6 +36,8 @@ type streamChunkMsg struct {
 	content   string
 	reasoning string
 	done      bool // true when stream is exhausted
+	usage     rag.TokenUsage
+	hasUsage  bool
 }
 
 // appErrMsg wraps errors that happen during the pipeline stages.
@@ -111,4 +113,3 @@ type llmInfoMsg struct {
 type embedderInfoMsg struct {
 	err error
 }
-

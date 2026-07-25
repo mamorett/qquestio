@@ -25,24 +25,24 @@ import (
 type appState int
 
 const (
-	stateIdle        appState = iota // Waiting for user input
-	stateEmbedding                   // Generating embedding vector
-	stateSearching                   // Querying Qdrant
-	stateReranking                   // Reranking retrieved documents
-	stateStreaming                   // Receiving LLM SSE chunks
-	stateError                       // Displaying error, input still active
+	stateIdle         appState = iota // Waiting for user input
+	stateEmbedding                    // Generating embedding vector
+	stateSearching                    // Querying Qdrant
+	stateReranking                    // Reranking retrieved documents
+	stateStreaming                    // Receiving LLM SSE chunks
+	stateError                        // Displaying error, input still active
 	stateConfirmQuit                  // Awaiting exit confirmation (first Ctrl+C pressed)
-	stateConfirmSkill                // Awaiting skill execution confirmation
+	stateConfirmSkill                 // Awaiting skill execution confirmation
 )
 
 type ConversationTurn struct {
-	Role                    string            `json:"role"`                      // "user" | "assistant" | "system"
-	Content                 string            `json:"content"`                   // The text content
-	Reasoning               string            `json:"reasoning,omitempty"`       // The thinking process text
-	References              []rag.QdrantPoint `json:"references,omitempty"`      // Retrieved context points (only for assistant responses)
-	RenderedContent         string            `json:"rendered_content,omitempty"` // Cached rendered markdown
-	RenderedWidth           int               `json:"rendered_width,omitempty"`   // The width at which it was rendered
-	RenderedReferences      string            `json:"rendered_references,omitempty"` // Cached rendered references block
+	Role                    string            `json:"role"`                                // "user" | "assistant" | "system"
+	Content                 string            `json:"content"`                             // The text content
+	Reasoning               string            `json:"reasoning,omitempty"`                 // The thinking process text
+	References              []rag.QdrantPoint `json:"references,omitempty"`                // Retrieved context points (only for assistant responses)
+	RenderedContent         string            `json:"rendered_content,omitempty"`          // Cached rendered markdown
+	RenderedWidth           int               `json:"rendered_width,omitempty"`            // The width at which it was rendered
+	RenderedReferences      string            `json:"rendered_references,omitempty"`       // Cached rendered references block
 	RenderedReferencesWidth int               `json:"rendered_references_width,omitempty"` // The width at which references were rendered
 }
 
@@ -54,18 +54,18 @@ type Model struct {
 	leakState      int    // State machine tracker to filter out leaked terminal SGR mouse sequences
 
 	// --- Runtime state (mutable via slash commands) ---
-	collection        string // Active Qdrant collection (init: cfg.DefaultCollection)
-	searchLimit       int    // Number of Qdrant results (default: 5)
-	searchCap         int    // Hard upper bound on candidate pool for Qdrant search (0 = no cap, search full corpus)
-	rerankerPool      int    // Primary candidate pool size for reranker (0 = auto)
-	searchExpand      int    // ±N adjacent chunks to expand each top match from the same document (0 = disabled, 1 = default)
-	searchMode        string // "auto" (default), "exact" (force server-side), or "local" (client-side brute-force using all CPU cores)
-	systemPrompt      string // Custom system prompt (default: built-in RAG prompt)
-	ragMode           string // RAG mode: "strict" or "hybrid"
-	filterKey         string // Active filter metadata key
-	filterValue       string // Active filter metadata value
-	disableReranker   bool   // Toggle to bypass reranker step
-	cacheForceRefresh bool   // When true, the next full-corpus search re-scrolls Qdrant (set by /cache refresh, auto-cleared after one use)
+	collection          string // Active Qdrant collection (init: cfg.DefaultCollection)
+	searchLimit         int    // Number of Qdrant results (default: 5)
+	searchCap           int    // Hard upper bound on candidate pool for Qdrant search (0 = no cap, search full corpus)
+	rerankerPool        int    // Primary candidate pool size for reranker (0 = auto)
+	searchExpand        int    // ±N adjacent chunks to expand each top match from the same document (0 = disabled, 1 = default)
+	searchMode          string // "auto" (default), "exact" (force server-side), or "local" (client-side brute-force using all CPU cores)
+	systemPrompt        string // Custom system prompt (default: built-in RAG prompt)
+	ragMode             string // RAG mode: "strict" or "hybrid"
+	filterKey           string // Active filter metadata key
+	filterValue         string // Active filter metadata value
+	disableReranker     bool   // Toggle to bypass reranker step
+	cacheForceRefresh   bool   // When true, the next full-corpus search re-scrolls Qdrant (set by /cache refresh, auto-cleared after one use)
 	cacheInfo           string // Last known cache summary for header display (e.g. "✓ 1.2M pts, 2m ago")
 	cacheFilterAtWarmup string // The filter string used during cache warming
 
@@ -85,6 +85,12 @@ type Model struct {
 	output        string             // Accumulated LLM response text for current turn
 	reasoning     string             // Accumulated thought process text for current turn
 	showRawSource bool               // Toggle between glamour-rendered markdown and raw markdown source
+
+	// --- Token accounting ---
+	tokensConsumed        int  // Cumulative prompt + completion tokens for this session
+	lastTurnTokens        int  // Tokens consumed by the most recently completed LLM call
+	tokensAreEstimated    bool // True when the server did not provide usage metadata
+	currentPromptEstimate int  // Fallback prompt estimate for the active LLM call
 
 	// --- Pipeline transient ---
 	lastQuery     string            // The user query that started the pipeline
@@ -108,7 +114,7 @@ type Model struct {
 	llmInfoErr error
 
 	// --- Embedder Connection Stats ---
-	embedderStatus string
+	embedderStatus  string
 	embedderInfoErr error
 
 	// --- Prompt History ---
@@ -132,25 +138,41 @@ type Model struct {
 }
 
 // estimateContextTokens returns a rough token count of what is ACTUALLY sent
-// to the LLM: turn content (Q&A text), the text of previously retrieved context
-// chunks injected into history turns, and the current query's retrieved chunks.
+// to the LLM: conversation text and the current query's retrieved chunks.
+// Historical references remain available in the transcript, but are not
+// replayed into later prompts.
 func (m *Model) estimateContextTokens() int {
 	total := 0
-	for i, turn := range m.history {
+	for _, turn := range m.history {
 		total += len(turn.Content) / 4
-		if turn.Role == "user" {
-			if i+1 < len(m.history) && m.history[i+1].Role == "assistant" {
-				for _, pt := range m.history[i+1].References {
-					total += len(pt.ExtractText()) / 4
-				}
-			}
-		}
 	}
 	// Count the current query's retrieved context (not yet in history)
 	for _, pt := range m.lastPoints {
 		total += len(pt.ExtractText()) / 4
 	}
 	return total
+}
+
+func estimateChatMessageTokens(messages []rag.ChatMessage) int {
+	total := 0
+	for _, message := range messages {
+		total += (len(message.Role) + len(message.Content)) / 4
+	}
+	return total
+}
+
+func (m *Model) recordTokenUsage(usage rag.TokenUsage, hasUsage bool) {
+	turnTokens := usage.TotalTokens
+	m.tokensAreEstimated = false
+	if !hasUsage || turnTokens <= 0 {
+		turnTokens = m.currentPromptEstimate + (len(m.output)+len(m.reasoning))/4
+		m.tokensAreEstimated = true
+	}
+	if turnTokens < 0 {
+		turnTokens = 0
+	}
+	m.lastTurnTokens = turnTokens
+	m.tokensConsumed += turnTokens
 }
 
 // compactHistory summarizes the oldest conversation turns beyond the keepPairs
@@ -283,8 +305,6 @@ func (m *Model) Init() tea.Cmd {
 		m.checkEmbedderInfoCmd(),
 	)
 }
-
-
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Filter out leaked CSI/SGR mouse escape sequences that some terminals
@@ -582,6 +602,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case streamChunkMsg:
 		if msg.done {
+			m.recordTokenUsage(msg.usage, msg.hasUsage)
 			// Check if output contains a tool call
 			if name, args, ok := ParseCall(m.output); ok {
 				cleanedOutput := cleanLLMOutput(m.output)
@@ -778,7 +799,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				refWidth = 20
 			}
 			if refWidth > m.width/2 {
-				refWidth = m.width/2
+				refWidth = m.width / 2
 			}
 			mainWidth := m.width - refWidth
 
@@ -991,6 +1012,18 @@ func (m *Model) renderHeader() string {
 		)
 	}
 
+	// Cumulative prompt + completion tokens consumed by this session. A tilde
+	// indicates a fallback estimate because the streaming server omitted usage.
+	tokenLabel := formatNumber(m.tokensConsumed)
+	if m.tokensAreEstimated && m.tokensConsumed > 0 {
+		tokenLabel = "~" + tokenLabel
+	}
+	tokensStr := fmt.Sprintf("  %s  %s %s",
+		delimStyle.Render("│"),
+		labelStyle.Render("Tokens:"),
+		lipgloss.NewStyle().Foreground(nord9).Render(tokenLabel),
+	)
+
 	dbStatusDisp := ""
 	if m.qdrantInfoErr != nil {
 		dbStatusDisp = " " + lipgloss.NewStyle().Foreground(nord11).Render("(✗ connection error)")
@@ -1000,7 +1033,7 @@ func (m *Model) renderHeader() string {
 		dbStatusDisp = " " + lipgloss.NewStyle().Foreground(nord14).Render("(✓)")
 	}
 
-	qdrantInfo := fmt.Sprintf(" %s %s%s  %s  %s %s  %s %s %d  %s  %s %s  %s  %s %s  %s  %s %s  %s  %s %s  %s  %s %s%s%s",
+	qdrantInfo := fmt.Sprintf(" %s %s%s  %s  %s %s  %s %s %d  %s  %s %s  %s  %s %s  %s  %s %s  %s  %s %s  %s  %s %s%s%s%s",
 		labelStyle.Render("DB:"), valueStyle.Render(m.cfg.QdrantURL), dbStatusDisp,
 		delimStyle.Render("│"),
 		labelStyle.Render("Col:"), valueStyle.Render(m.collection),
@@ -1017,6 +1050,7 @@ func (m *Model) renderHeader() string {
 		delimStyle.Render("│"),
 		labelStyle.Render("RAG:"), modeView,
 		contextStr,
+		tokensStr,
 		statsStr,
 	)
 	line2Pad := m.width - lipgloss.Width(qdrantInfo)
@@ -1162,12 +1196,38 @@ func (m *Model) renderFooter() string {
 	} else {
 		styles := DefaultStyles()
 		inputView := m.textInput.View()
-		text := " " + inputView
+		tokenText := fmt.Sprintf("TOKENS %s", formatNumber(m.tokensConsumed))
+		if m.tokensAreEstimated && m.tokensConsumed > 0 {
+			tokenText = "TOKENS ~" + formatNumber(m.tokensConsumed)
+		}
+		if m.lastTurnTokens > 0 {
+			turnText := formatNumber(m.lastTurnTokens)
+			if m.tokensAreEstimated {
+				turnText = "~" + turnText
+			}
+			tokenText += "  ·  TURN " + turnText
+		}
+		tokenView := lipgloss.NewStyle().Foreground(nord13).Bold(true).Render(tokenText)
+		separator := lipgloss.NewStyle().Foreground(nord3).Render("  │  ")
 
-		// Pad footer to targetWidth
-		padding := targetWidth - lipgloss.Width(text)
-		if padding > 0 {
-			text += strings.Repeat(" ", padding)
+		// Keep the input left-aligned and reserve space for the live token badge.
+		inputText := " " + inputView
+		availableInputWidth := targetWidth - lipgloss.Width(tokenText) - lipgloss.Width(separator) - 1
+		if availableInputWidth < 1 {
+			availableInputWidth = 1
+		}
+		inputView = lipgloss.NewStyle().MaxWidth(availableInputWidth).Render(inputView)
+		inputText = " " + inputView
+		padding := targetWidth - lipgloss.Width(inputText) - lipgloss.Width(separator) - lipgloss.Width(tokenView)
+		if padding < 0 {
+			padding = 0
+		}
+		text := inputText + strings.Repeat(" ", padding) + separator + tokenView
+
+		// Pad footer to targetWidth. This also keeps the background full-width
+		// when the terminal is narrower than the token badge.
+		if remaining := targetWidth - lipgloss.Width(text); remaining > 0 {
+			text += strings.Repeat(" ", remaining)
 		}
 		footerText = styles.Footer.Render(text)
 	}
@@ -1236,7 +1296,7 @@ func (m *Model) updateRefViewport() {
 		m.refViewport.SetContent("\n  No references loaded.\n  Run a query to retrieve context.")
 		return
 	}
-	
+
 	// Format references wrapping them to the viewport's width.
 	rendered := formatReferences(refs, m.refViewport.Width)
 	m.refViewport.SetContent(rendered)
@@ -1261,7 +1321,7 @@ func (m *Model) recalcLayout() {
 		refWidth = 20
 	}
 	if refWidth > m.width/2 {
-		refWidth = m.width/2
+		refWidth = m.width / 2
 	}
 	mainWidth := m.width - refWidth
 
@@ -1986,18 +2046,20 @@ func renderMarkdown(text string, width int) string {
 }
 
 type Session struct {
-	ID           string             `json:"id"`
-	Collection   string             `json:"collection,omitempty"`
-	SearchLimit  int                `json:"search_limit,omitempty"`
-	SearchCap    int                `json:"search_cap,omitempty"`
-	RerankerPool int                `json:"reranker_pool,omitempty"`
-	SearchExpand int                `json:"search_expand,omitempty"`
-	SearchMode   string             `json:"search_mode,omitempty"`
-	SystemPrompt string             `json:"system_prompt,omitempty"`
-	RAGMode      string             `json:"rag_mode,omitempty"`
-	FilterKey    string             `json:"filter_key,omitempty"`
-	FilterValue  string             `json:"filter_value,omitempty"`
-	History      []ConversationTurn `json:"history"`
+	ID                 string             `json:"id"`
+	Collection         string             `json:"collection,omitempty"`
+	SearchLimit        int                `json:"search_limit,omitempty"`
+	SearchCap          int                `json:"search_cap,omitempty"`
+	RerankerPool       int                `json:"reranker_pool,omitempty"`
+	SearchExpand       int                `json:"search_expand,omitempty"`
+	SearchMode         string             `json:"search_mode,omitempty"`
+	SystemPrompt       string             `json:"system_prompt,omitempty"`
+	RAGMode            string             `json:"rag_mode,omitempty"`
+	FilterKey          string             `json:"filter_key,omitempty"`
+	FilterValue        string             `json:"filter_value,omitempty"`
+	History            []ConversationTurn `json:"history"`
+	TokensConsumed     int                `json:"tokens_consumed,omitempty"`
+	TokensAreEstimated bool               `json:"tokens_are_estimated,omitempty"`
 }
 
 func GetSessionsDir() (string, error) {
@@ -2063,18 +2125,20 @@ func (m *Model) saveSession() error {
 	}
 
 	sess := Session{
-		ID:           m.sessionID,
-		Collection:   m.collection,
-		SearchLimit:  m.searchLimit,
-		SearchCap:    m.searchCap,
-		RerankerPool: m.rerankerPool,
-		SearchExpand: m.searchExpand,
-		SearchMode:   m.searchMode,
-		SystemPrompt: m.systemPrompt,
-		RAGMode:      m.ragMode,
-		FilterKey:    m.filterKey,
-		FilterValue:  m.filterValue,
-		History:      historyCopy,
+		ID:                 m.sessionID,
+		Collection:         m.collection,
+		SearchLimit:        m.searchLimit,
+		SearchCap:          m.searchCap,
+		RerankerPool:       m.rerankerPool,
+		SearchExpand:       m.searchExpand,
+		SearchMode:         m.searchMode,
+		SystemPrompt:       m.systemPrompt,
+		RAGMode:            m.ragMode,
+		FilterKey:          m.filterKey,
+		FilterValue:        m.filterValue,
+		History:            historyCopy,
+		TokensConsumed:     m.tokensConsumed,
+		TokensAreEstimated: m.tokensAreEstimated,
 	}
 
 	data, err := json.MarshalIndent(sess, "", "  ")
@@ -2124,6 +2188,8 @@ func (m *Model) loadSession(sessionID string) error {
 	m.filterKey = sess.FilterKey
 	m.filterValue = sess.FilterValue
 	m.history = sess.History
+	m.tokensConsumed = sess.TokensConsumed
+	m.tokensAreEstimated = sess.TokensAreEstimated
 
 	// Rebuild input history from user turns
 	m.inputHistory = nil
@@ -2158,5 +2224,3 @@ func (m *Model) selectRandomLoadingMessage() {
 	}
 	m.loadingMessage = sentences[time.Now().UnixNano()%int64(len(sentences))]
 }
-
-

@@ -17,7 +17,18 @@ import (
 type SSEReader struct {
 	body    io.ReadCloser
 	scanner *bufio.Scanner
+	usage   TokenUsage
 }
+
+// TokenUsage contains token counts reported by an OpenAI-compatible API.
+type TokenUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+// Usage returns usage metadata received in the stream, if the server sent it.
+func (r *SSEReader) Usage() TokenUsage { return r.usage }
 
 // ChatMessage represents a single message in the LLM chat history.
 type ChatMessage struct {
@@ -26,20 +37,22 @@ type ChatMessage struct {
 }
 
 type LiteLLMRequest struct {
-	Model     string                 `json:"model"`
-	Messages  []ChatMessage          `json:"messages"`
-	Stream    bool                   `json:"stream"`
-	MaxTokens int                    `json:"max_tokens,omitempty"`
-	Options   map[string]interface{} `json:"options,omitempty"`
+	Model         string                 `json:"model"`
+	Messages      []ChatMessage          `json:"messages"`
+	Stream        bool                   `json:"stream"`
+	StreamOptions map[string]interface{} `json:"stream_options,omitempty"`
+	MaxTokens     int                    `json:"max_tokens,omitempty"`
+	Options       map[string]interface{} `json:"options,omitempty"`
 }
 
 func StartLiteLLMStream(ctx context.Context, baseURL, apiKey, model string, maxTokens, contextLimit int, messages []ChatMessage) (*SSEReader, error) {
 	url := AppendAPIPath(baseURL, "chat/completions")
 
 	reqBody := LiteLLMRequest{
-		Model:    model,
-		Messages: messages,
-		Stream:   true,
+		Model:         model,
+		Messages:      messages,
+		Stream:        true,
+		StreamOptions: map[string]interface{}{"include_usage": true},
 	}
 
 	if maxTokens > 0 {
@@ -116,10 +129,14 @@ func (r *SSEReader) Next() (string, string, bool, error) {
 					ReasoningContent string `json:"reasoning_content"`
 				} `json:"delta"`
 			} `json:"choices"`
+			Usage *TokenUsage `json:"usage"`
 		}
 
 		if err := json.Unmarshal([]byte(dataVal), &chunk); err != nil {
 			return "", "", false, fmt.Errorf("failed to parse SSE chunk: %w", err)
+		}
+		if chunk.Usage != nil {
+			r.usage = *chunk.Usage
 		}
 
 		if len(chunk.Choices) > 0 {

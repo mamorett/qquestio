@@ -419,6 +419,3 @@ func TestFormatReferencesNegativeScores(t *testing.T) {
 		t.Errorf("expected output to contain Desert.md, but got:\n%s", out)
 	}
 }
-
-
-

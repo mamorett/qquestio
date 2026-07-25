@@ -93,7 +93,6 @@ func (m *Model) computeRerankerPool() int {
 	return pool
 }
 
-//
 //   - Cap set (m.searchCap > 0): use Qdrant's HNSW query API with the cap as
 //     the candidate pool size. Fast, but bounded by the cap (approximate recall).
 //
@@ -238,6 +237,9 @@ func (m *Model) preloadCacheInfoCmd() tea.Cmd {
 func (m *Model) startLLMStreamCmd() tea.Cmd {
 	return func() tea.Msg {
 		messages := m.buildPromptMessages() // system + history + RAG context + user query
+		// Keep a fallback estimate for providers that do not return usage
+		// metadata in their streaming response.
+		m.currentPromptEstimate = estimateChatMessageTokens(messages)
 		ctx, cancel := context.WithCancel(m.ctx)
 		m.cancelRequest = cancel
 
@@ -262,7 +264,14 @@ func (m *Model) receiveStreamChunkCmd() tea.Cmd {
 		if err != nil {
 			return appErrMsg{err: err, reason: "Stream read error", stage: "stream"}
 		}
-		return streamChunkMsg{content: chunk, reasoning: reasoning, done: done}
+		usage := m.streamReader.Usage()
+		return streamChunkMsg{
+			content:   chunk,
+			reasoning: reasoning,
+			done:      done,
+			usage:     usage,
+			hasUsage:  usage.TotalTokens > 0 || usage.PromptTokens > 0 || usage.CompletionTokens > 0,
+		}
 	}
 }
 
@@ -321,7 +330,6 @@ func (m *Model) executeSkillCmd(name, args string) tea.Cmd {
 		return skillResultMsg{name: name, input: args, output: res, err: err}
 	}
 }
-
 
 // rerankPointsCmd (Optional Stage 2.5) reranks the retrieved Qdrant points
 // using a generic reranker. Critically, it now:
@@ -492,36 +500,13 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 	msgs = append(msgs, rag.ChatMessage{Role: "system", Content: system})
 
 	// 2. Conversation history (multi-turn)
-	// For each past user turn, we look up the references from the subsequent assistant turn
-	// (if available) and format them back into the query context, so the LLM remembers
-	// the retrieved context that was present during those turns.
+	// Keep historical references for the transcript and references panel, but do
+	// not replay them into the active prompt. Retrieval is turn-scoped; replaying
+	// old results contaminates refined searches with stale documents.
 	for i := 0; i < len(m.history); i++ {
 		turn := m.history[i]
 		if turn.Role == "user" {
-			var contextBuilder strings.Builder
-			var turnRefs []rag.QdrantPoint
-			if i+1 < len(m.history) && m.history[i+1].Role == "assistant" {
-				turnRefs = m.history[i+1].References
-			}
-
-			if len(turnRefs) > 0 {
-				contextBuilder.WriteString("Retrieved Context Chunks from Knowledge Base:\n")
-				for idx, pt := range turnRefs {
-					source := extractDocumentName(pt.Payload)
-					textStr := pt.ExtractText()
-					pointIDStr := fmt.Sprintf("%v", pt.ID)
-
-					docName := source
-					if docName == "" {
-						docName = fmt.Sprintf("ID %s", pointIDStr)
-					}
-					contextBuilder.WriteString(fmt.Sprintf("--- Chunk %d | Document: %s ---\n%s\n", idx+1, docName, textStr))
-				}
-				contextBuilder.WriteString("---\n\n")
-			}
-
-			userMsg := fmt.Sprintf("%sQuestion: %s", contextBuilder.String(), turn.Content)
-			msgs = append(msgs, rag.ChatMessage{Role: "user", Content: userMsg})
+			msgs = append(msgs, rag.ChatMessage{Role: "user", Content: "Question: " + turn.Content})
 		} else if turn.Role == "assistant" {
 			msgs = append(msgs, rag.ChatMessage{Role: "assistant", Content: turn.Content})
 		}
