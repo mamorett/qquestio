@@ -282,7 +282,7 @@ func NewModel(ctx context.Context, cfg Config) *Model {
 	blurredStyle = focusedStyle
 	ti.FocusedStyle = focusedStyle
 	ti.BlurredStyle = blurredStyle
-	ti.Cursor.Style = lipgloss.NewStyle().Background(nord8).Foreground(nord1)
+	ti.Cursor.Style = lipgloss.NewStyle().Background(nord8).Foreground(nord8)
 	ti.Cursor.SetMode(cursor.CursorBlink)
 	ti.SetPromptFunc(lipgloss.Width(ti.Prompt), func(line int) string {
 		if line == 0 {
@@ -1245,30 +1245,8 @@ func (m *Model) renderFooter() string {
 	} else {
 		styles := DefaultStyles()
 
-		// Render from the raw value rather than the textarea viewport. The
-		// textarea can horizontally scroll its internal viewport, which is the
-		// wrong behavior for this full-width, multi-row footer.
-		inputWidth := m.textInput.Width()
-		inputContentWidth := inputWidth - lipgloss.Width(" ❯ ")
-		if inputContentWidth < 1 {
-			inputContentWidth = 1
-		}
-		inputValue := m.textInput.Value()
-		inputLines := hardWrappedLines(inputValue, inputContentWidth)
-		if inputValue == "" {
-			inputLines = hardWrappedLines(m.textInput.Placeholder, inputContentWidth)
-		}
-		for i, line := range inputLines {
-			prompt := "   "
-			if i == 0 {
-				prompt = " ❯ "
-			}
-			lineStyle := lipgloss.NewStyle().Foreground(nord6)
-			if inputValue == "" {
-				lineStyle = lipgloss.NewStyle().Foreground(nord3)
-			}
-			inputLines[i] = lipgloss.NewStyle().Foreground(nord8).Bold(true).Render(prompt) + lineStyle.Render(line)
-		}
+		view := m.textInput.View()
+		inputLines := strings.Split(view, "\n")
 		for i := range inputLines {
 			line := inputLines[i]
 			padding := targetWidth - lipgloss.Width(line)
