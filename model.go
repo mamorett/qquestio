@@ -12,12 +12,14 @@ import (
 	"time"
 
 	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"qquestio/internal/rag"
 )
@@ -73,7 +75,7 @@ type Model struct {
 	state appState
 
 	// --- UI components ---
-	textInput   textinput.Model
+	textInput   textarea.Model
 	viewport    viewport.Model
 	refViewport viewport.Model
 	focusRef    bool // True if focused on the references panel
@@ -175,6 +177,25 @@ func (m *Model) recordTokenUsage(usage rag.TokenUsage, hasUsage bool) {
 	m.tokensConsumed += turnTokens
 }
 
+func hardWrappedLines(text string, width int) []string {
+	if width < 1 {
+		width = 1
+	}
+	var lines []string
+	for _, logicalLine := range strings.Split(text, "\n") {
+		wrapped := ansi.Hardwrap(logicalLine, width, true)
+		parts := strings.Split(wrapped, "\n")
+		if len(parts) == 0 {
+			parts = []string{""}
+		}
+		lines = append(lines, parts...)
+	}
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
+}
+
 // compactHistory summarizes the oldest conversation turns beyond the keepPairs
 // threshold, replacing them with a single system-turn summary. This prevents
 // the conversation from growing unboundedly and keeps LLM context usage in check.
@@ -249,12 +270,28 @@ func NewModel(ctx context.Context, cfg Config) *Model {
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(nord8)
 
-	ti := textinput.New()
+	ti := textarea.New()
 	ti.Placeholder = "Type your query here... (Ctrl+Y to copy last response, /help for commands)"
-	ti.Focus()
+	ti.ShowLineNumbers = false
 	ti.Prompt = " ❯ "
-	ti.PromptStyle = lipgloss.NewStyle().Foreground(nord8).Bold(true)
-	ti.TextStyle = lipgloss.NewStyle().Foreground(nord6)
+	focusedStyle, blurredStyle := textarea.DefaultStyles()
+	focusedStyle.Base = lipgloss.NewStyle().Background(nord1)
+	focusedStyle.Prompt = lipgloss.NewStyle().Foreground(nord8).Bold(true)
+	focusedStyle.Text = lipgloss.NewStyle().Foreground(nord6)
+	focusedStyle.Placeholder = lipgloss.NewStyle().Foreground(nord3)
+	blurredStyle = focusedStyle
+	ti.FocusedStyle = focusedStyle
+	ti.BlurredStyle = blurredStyle
+	ti.Cursor.Style = lipgloss.NewStyle().Background(nord8).Foreground(nord1)
+	ti.Cursor.SetMode(cursor.CursorBlink)
+	ti.SetPromptFunc(lipgloss.Width(ti.Prompt), func(line int) string {
+		if line == 0 {
+			return " ❯ "
+		}
+		return "   "
+	})
+	ti.SetHeight(1)
+	ti.Focus()
 
 	vp := viewport.New(0, 0)
 	vp.Style = lipgloss.NewStyle().Background(nord0).Foreground(nord4)
@@ -297,7 +334,7 @@ func NewModel(ctx context.Context, cfg Config) *Model {
 
 func (m *Model) Init() tea.Cmd {
 	return tea.Batch(
-		textinput.Blink,
+		textarea.Blink,
 		m.spinner.Tick,
 		m.fetchQdrantInfoCmd(),
 		m.preloadCacheInfoCmd(),
@@ -829,10 +866,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// escape sequences leak into the input buffer).
 	if _, isMouse := msg.(tea.MouseMsg); !isMouse {
 		if _, isWindowSize := msg.(tea.WindowSizeMsg); !isWindowSize {
-			var tiCmd tea.Cmd
-			m.textInput, tiCmd = m.textInput.Update(msg)
-			cmds = append(cmds, tiCmd)
+			forwardToTextInput := true
+			if keyMsg, isKey := msg.(tea.KeyMsg); isKey && keyMsg.Type == tea.KeyEnter {
+				// Enter is handled above as submit; do not let the textarea
+				// turn it into a newline as well.
+				forwardToTextInput = false
+			}
+			if forwardToTextInput {
+				var tiCmd tea.Cmd
+				m.textInput, tiCmd = m.textInput.Update(msg)
+				cmds = append(cmds, tiCmd)
+			}
 		}
+	}
+
+	if _, isWindowSize := msg.(tea.WindowSizeMsg); !isWindowSize {
+		m.recalcLayout()
 	}
 
 	if m.state == stateStreaming || m.state == stateIdle || m.state == stateError {
@@ -1195,41 +1244,40 @@ func (m *Model) renderFooter() string {
 			Render(confirmText)
 	} else {
 		styles := DefaultStyles()
-		inputView := m.textInput.View()
-		tokenText := fmt.Sprintf("TOKENS %s", formatNumber(m.tokensConsumed))
-		if m.tokensAreEstimated && m.tokensConsumed > 0 {
-			tokenText = "TOKENS ~" + formatNumber(m.tokensConsumed)
+
+		// Render from the raw value rather than the textarea viewport. The
+		// textarea can horizontally scroll its internal viewport, which is the
+		// wrong behavior for this full-width, multi-row footer.
+		inputWidth := m.textInput.Width()
+		inputContentWidth := inputWidth - lipgloss.Width(" ❯ ")
+		if inputContentWidth < 1 {
+			inputContentWidth = 1
 		}
-		if m.lastTurnTokens > 0 {
-			turnText := formatNumber(m.lastTurnTokens)
-			if m.tokensAreEstimated {
-				turnText = "~" + turnText
+		inputValue := m.textInput.Value()
+		inputLines := hardWrappedLines(inputValue, inputContentWidth)
+		if inputValue == "" {
+			inputLines = hardWrappedLines(m.textInput.Placeholder, inputContentWidth)
+		}
+		for i, line := range inputLines {
+			prompt := "   "
+			if i == 0 {
+				prompt = " ❯ "
 			}
-			tokenText += "  ·  TURN " + turnText
+			lineStyle := lipgloss.NewStyle().Foreground(nord6)
+			if inputValue == "" {
+				lineStyle = lipgloss.NewStyle().Foreground(nord3)
+			}
+			inputLines[i] = lipgloss.NewStyle().Foreground(nord8).Bold(true).Render(prompt) + lineStyle.Render(line)
 		}
-		tokenView := lipgloss.NewStyle().Foreground(nord13).Bold(true).Render(tokenText)
-		separator := lipgloss.NewStyle().Foreground(nord3).Render("  │  ")
-
-		// Keep the input left-aligned and reserve space for the live token badge.
-		inputText := " " + inputView
-		availableInputWidth := targetWidth - lipgloss.Width(tokenText) - lipgloss.Width(separator) - 1
-		if availableInputWidth < 1 {
-			availableInputWidth = 1
+		for i := range inputLines {
+			line := inputLines[i]
+			padding := targetWidth - lipgloss.Width(line)
+			if padding > 0 {
+				line += strings.Repeat(" ", padding)
+			}
+			inputLines[i] = line
 		}
-		inputView = lipgloss.NewStyle().MaxWidth(availableInputWidth).Render(inputView)
-		inputText = " " + inputView
-		padding := targetWidth - lipgloss.Width(inputText) - lipgloss.Width(separator) - lipgloss.Width(tokenView)
-		if padding < 0 {
-			padding = 0
-		}
-		text := inputText + strings.Repeat(" ", padding) + separator + tokenView
-
-		// Pad footer to targetWidth. This also keeps the background full-width
-		// when the terminal is narrower than the token badge.
-		if remaining := targetWidth - lipgloss.Width(text); remaining > 0 {
-			text += strings.Repeat(" ", remaining)
-		}
-		footerText = styles.Footer.Render(text)
+		footerText = styles.Footer.Render(strings.Join(inputLines, "\n"))
 	}
 
 	return footerText
@@ -1314,7 +1362,6 @@ func (m *Model) recalcLayout() {
 	if m.cacheInfo != "" && currentFilter != m.cacheFilterAtWarmup {
 		headerH++
 	}
-	footerH := 1
 
 	refWidth := m.width / 3
 	if refWidth < 20 {
@@ -1324,6 +1371,25 @@ func (m *Model) recalcLayout() {
 		refWidth = m.width / 2
 	}
 	mainWidth := m.width - refWidth
+
+	// The input belongs to the conversation column. Keeping its width separate
+	// from the document column prevents long prompts from disappearing beneath
+	// the references panel.
+	inputWidth := mainWidth - 2
+	if inputWidth < 10 {
+		inputWidth = 10
+	}
+	m.textInput.SetWidth(inputWidth)
+	inputContentWidth := inputWidth - lipgloss.Width(m.textInput.Prompt)
+	if inputContentWidth < 1 {
+		inputContentWidth = 1
+	}
+	inputLines := hardWrappedLines(m.textInput.Value(), inputContentWidth)
+	if m.textInput.Value() == "" {
+		inputLines = hardWrappedLines(m.textInput.Placeholder, inputContentWidth)
+	}
+	m.textInput.SetHeight(len(inputLines))
+	footerH := len(inputLines)
 
 	bodyHeight := m.height - headerH - footerH
 	viewportHeight := bodyHeight - 2
@@ -1337,11 +1403,6 @@ func (m *Model) recalcLayout() {
 	m.refViewport.Width = refWidth - 2
 	m.refViewport.Height = viewportHeight
 
-	tiWidth := m.width - 6
-	if tiWidth < 10 {
-		tiWidth = 10
-	}
-	m.textInput.Width = tiWidth
 }
 
 // updateViewport constructs and renders the conversation history in the viewport.
@@ -1353,7 +1414,28 @@ func (m *Model) updateViewport() {
 	for i := range m.history {
 		turn := &m.history[i]
 		if turn.Role == "user" {
-			sb.WriteString(lipgloss.NewStyle().Foreground(nord8).Bold(true).Render("❯ You: ") + turn.Content + "\n\n")
+			label := "❯ You: "
+			labelWidth := lipgloss.Width(label)
+			contentWidth := m.viewport.Width - labelWidth
+			if contentWidth < 1 {
+				contentWidth = 1
+			}
+			// Hard-wrap as well as word-wrap: pasted URLs and other
+			// whitespace-free strings must not run past the viewport edge.
+			wrapped := ansi.Hardwrap(turn.Content, contentWidth, true)
+			wrappedLines := strings.Split(strings.TrimSuffix(wrapped, "\n"), "\n")
+			for lineNo, line := range wrappedLines {
+				if lineNo == 0 {
+					sb.WriteString(lipgloss.NewStyle().Foreground(nord8).Bold(true).Render(label))
+				} else {
+					sb.WriteString(strings.Repeat(" ", labelWidth))
+				}
+				sb.WriteString(line)
+				if lineNo < len(wrappedLines)-1 {
+					sb.WriteByte('\n')
+				}
+			}
+			sb.WriteString("\n\n")
 		} else if turn.Role == "assistant" {
 			if m.showRawSource {
 				content := turn.Content
@@ -1382,7 +1464,25 @@ func (m *Model) updateViewport() {
 
 	// Render currently processing user query
 	if m.lastQuery != "" {
-		sb.WriteString(lipgloss.NewStyle().Foreground(nord8).Bold(true).Render("❯ You: ") + m.lastQuery + "\n\n")
+		label := "❯ You: "
+		labelWidth := lipgloss.Width(label)
+		contentWidth := m.viewport.Width - labelWidth
+		if contentWidth < 1 {
+			contentWidth = 1
+		}
+		wrappedLines := hardWrappedLines(m.lastQuery, contentWidth)
+		for lineNo, line := range wrappedLines {
+			if lineNo == 0 {
+				sb.WriteString(lipgloss.NewStyle().Foreground(nord8).Bold(true).Render(label))
+			} else {
+				sb.WriteString(strings.Repeat(" ", labelWidth))
+			}
+			sb.WriteString(line)
+			if lineNo < len(wrappedLines)-1 {
+				sb.WriteByte('\n')
+			}
+		}
+		sb.WriteString("\n\n")
 	}
 
 	// Render currently processing stages (embedding, searching, reranking)

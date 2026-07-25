@@ -419,3 +419,57 @@ func TestFormatReferencesNegativeScores(t *testing.T) {
 		t.Errorf("expected output to contain Desert.md, but got:\n%s", out)
 	}
 }
+
+func TestLongPromptAndUserTurnWrap(t *testing.T) {
+	m := NewModel(context.Background(), Config{})
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = model.(*Model)
+	longText := strings.Repeat("long-prompt ", 40)
+	longUnbrokenText := strings.Repeat("https://example.com/a-very-long-path/", 20)
+	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(longText), Paste: true})
+	m = model.(*Model)
+
+	if m.textInput.Height() < 2 {
+		t.Fatalf("long prompt should occupy multiple rows, got height %d", m.textInput.Height())
+	}
+	inputView := m.textInput.View()
+	if strings.Count(inputView, "\n") < 2 {
+		t.Fatalf("long prompt view should contain wrapped rows, got:\n%s", inputView)
+	}
+	if strings.Count(inputView, "❯") != 1 {
+		t.Fatalf("wrapped prompt should show one prompt marker, got:\n%s", inputView)
+	}
+	if strings.Count(m.renderFooter(), "\n") < 2 {
+		t.Fatalf("footer should grow with the pasted prompt, got:\n%s", m.renderFooter())
+	}
+	if !strings.Contains(m.View(), "long-prompt") {
+		t.Fatalf("full model view lost pasted prompt")
+	}
+
+	m.textInput.Reset()
+	m.history = []ConversationTurn{{Role: "user", Content: longText}}
+	m.updateViewport()
+	if strings.Count(m.viewport.View(), "❯ You:") != 1 {
+		t.Fatalf("user turn should keep one label, got:\n%s", m.viewport.View())
+	}
+	if !strings.Contains(m.viewport.View(), "long-prompt") {
+		t.Fatalf("wrapped user turn lost its content")
+	}
+	if strings.Count(m.viewport.View(), "\n") < 2 {
+		t.Fatalf("long user turn should wrap onto multiple rows, got:\n%s", m.viewport.View())
+	}
+
+	m.history = []ConversationTurn{{Role: "user", Content: longUnbrokenText}}
+	m.updateViewport()
+	if strings.Count(m.viewport.View(), "\n") < 2 {
+		t.Fatalf("unbroken pasted user turn should hard-wrap onto multiple rows, got:\n%s", m.viewport.View())
+	}
+
+	m.history = nil
+	m.lastQuery = longUnbrokenText
+	m.state = stateEmbedding
+	m.updateViewport()
+	if strings.Count(m.viewport.View(), "❯ You:") != 1 || strings.Count(m.viewport.View(), "\n") < 2 {
+		t.Fatalf("live user query should hard-wrap onto multiple rows, got:\n%s", m.viewport.View())
+	}
+}
