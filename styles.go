@@ -48,6 +48,7 @@ type Styles struct {
 	RefViewportFocused    lipgloss.Style // focused references viewport border
 	RefViewportUnfocused  lipgloss.Style // unfocused references viewport border
 	SpinnerStyle  lipgloss.Style // fg: nord8
+	ThinkingText  lipgloss.Style // fg: nord3, italic, subdued
 }
 
 func DefaultStyles() Styles {
@@ -98,6 +99,9 @@ func DefaultStyles() Styles {
 			Foreground(nord4),
 		SpinnerStyle: lipgloss.NewStyle().
 			Foreground(nord8),
+		ThinkingText: lipgloss.NewStyle().
+			Foreground(nord3).
+			Italic(true),
 	}
 }
 

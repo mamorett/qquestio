@@ -1273,7 +1273,8 @@ func (m *Model) getRenderedTurn(turn *ConversationTurn) string {
 	if turn.RenderedContent == "" || turn.RenderedWidth != targetWidth {
 		content := turn.Content
 		if turn.Reasoning != "" {
-			content = "*Thinking:*\n" + turn.Reasoning + "\n\n" + content
+			// Use horizontal rule and code block for clear visual separation
+			content = "---\n\n**Thinking** (dimmed):\n\n```\n" + turn.Reasoning + "\n```\n\n---\n\n" + content
 		}
 		turn.RenderedContent = renderMarkdown(content, targetWidth)
 		turn.RenderedWidth = targetWidth
@@ -1486,7 +1487,7 @@ func (m *Model) updateViewport() {
 		if m.output != "" || m.reasoning != "" {
 			var currentText string
 			if m.reasoning != "" {
-				currentText = "*Thinking:*\n" + m.reasoning + "\n\n"
+				currentText = "---\n\n**Thinking** (dimmed):\n\n```\n" + m.reasoning + "\n```\n\n---\n\n"
 			}
 			currentText += cleanLLMOutput(m.output)
 
@@ -1670,7 +1671,7 @@ func (m *Model) saveLastResponseCmd(filename string) tea.Cmd {
 			turn := m.history[i]
 			content := turn.Content
 			if turn.Reasoning != "" {
-				content = "*Thinking:*\n" + turn.Reasoning + "\n\n" + content
+				content = "---\n\n**Thinking** (dimmed):\n\n```\n" + turn.Reasoning + "\n```\n\n---\n\n" + content
 			}
 			lastResponse = content
 			break
@@ -1705,7 +1706,7 @@ func (m *Model) saveAllConversationCmd(filename string) tea.Cmd {
 		} else if turn.Role == "assistant" {
 			content := turn.Content
 			if turn.Reasoning != "" {
-				content = "*Thinking:*\n" + turn.Reasoning + "\n\n" + content
+				content = "---\n\n**Thinking** (dimmed):\n\n```\n" + turn.Reasoning + "\n```\n\n---\n\n" + content
 			}
 			sb.WriteString("## 🤖 Assistant\n\n" + content + "\n\n")
 			if len(turn.References) > 0 {
