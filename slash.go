@@ -396,7 +396,7 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 					turn := m.history[i]
 					content := turn.Content
 					if turn.Reasoning != "" {
-						content = "*Thinking:*\n" + turn.Reasoning + "\n\n" + content
+						content = "> *Thinking:*\n> " + strings.ReplaceAll(turn.Reasoning, "\n", "\n> ") + "\n\n" + content
 					}
 					lastResponse = content
 					break
