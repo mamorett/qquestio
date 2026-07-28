@@ -95,13 +95,14 @@ type Model struct {
 	currentPromptEstimate int  // Fallback prompt estimate for the active LLM call
 
 	// --- Pipeline transient ---
-	lastQuery     string            // The user query that started the pipeline
-	exactPhrase   string            // Parsed exact phrase (if any) to bypass embedding and force string match
-	exactPhrases  []string          // Parsed exact phrases (if any) to bypass embedding and force string match
-	ragContext    string            // Retrieved text from Qdrant (current turn)
-	lastPoints    []rag.QdrantPoint // Retrieved points from Qdrant (current turn)
-	cancelRequest context.CancelFunc
-	streamReader  *rag.SSEReader
+	lastQuery         string            // The user query that started the pipeline
+	forceExactPhrase  bool              // True when /exact command was used
+	exactPhrase       string            // Parsed exact phrase (if any) to bypass embedding and force string match
+	exactPhrases      []string          // Parsed exact phrases (if any) to bypass embedding and force string match
+	ragContext        string            // Retrieved text from Qdrant (current turn)
+	lastPoints        []rag.QdrantPoint // Retrieved points from Qdrant (current turn)
+	cancelRequest     context.CancelFunc
+	streamReader      *rag.SSEReader
 	escCount      int  // consecutive Esc presses
 	stoppedByUser bool // explicit user abort flag
 
@@ -139,6 +140,23 @@ type Model struct {
 	ctx context.Context
 }
 
+// estimateTokens approximates token count using a rune-aware heuristic:
+// - ASCII bytes: ~1 token per 4 bytes
+// - Non-ASCII runes (CJK, emoji, etc.): ~1 token per rune
+func estimateTokens(s string) int {
+	count := 0
+	asciiBytes := 0
+	for _, r := range s {
+		if r < 128 {
+			asciiBytes++
+		} else {
+			count++
+		}
+	}
+	count += asciiBytes / 4
+	return count
+}
+
 // estimateContextTokens returns a rough token count of what is ACTUALLY sent
 // to the LLM: conversation text and the current query's retrieved chunks.
 // Historical references remain available in the transcript, but are not
@@ -146,11 +164,11 @@ type Model struct {
 func (m *Model) estimateContextTokens() int {
 	total := 0
 	for _, turn := range m.history {
-		total += len(turn.Content) / 4
+		total += estimateTokens(turn.Content)
 	}
 	// Count the current query's retrieved context (not yet in history)
 	for _, pt := range m.lastPoints {
-		total += len(pt.ExtractText()) / 4
+		total += estimateTokens(pt.ExtractText())
 	}
 	return total
 }
@@ -158,7 +176,7 @@ func (m *Model) estimateContextTokens() int {
 func estimateChatMessageTokens(messages []rag.ChatMessage) int {
 	total := 0
 	for _, message := range messages {
-		total += (len(message.Role) + len(message.Content)) / 4
+		total += estimateTokens(message.Content) + estimateTokens(message.Role)
 	}
 	return total
 }
@@ -195,6 +213,9 @@ func hardWrappedLines(text string, width int) []string {
 	}
 	return lines
 }
+
+// CompactionSummaryPrefix marks system turns that contain compacted conversation history.
+const CompactionSummaryPrefix = "[ Context compacted"
 
 // compactHistory summarizes the oldest conversation turns beyond the keepPairs
 // threshold, replacing them with a single system-turn summary. This prevents
@@ -242,27 +263,40 @@ func (m *Model) compactHistory(keepPairs int) {
 
 // maybeAutoCompact fires context compaction when the estimated token count
 // exceeds 85% of the configured ContextLimit. No-op when ContextLimit == 0.
+// Loops until under 75% of budget or until no progress is made.
 func (m *Model) maybeAutoCompact() {
 	if m.cfg.ContextLimit <= 0 {
 		return
 	}
 	threshold := int(float64(m.cfg.ContextLimit) * 0.85)
-	if m.estimateContextTokens() <= threshold {
-		return
+	target := int(float64(m.cfg.ContextLimit) * 0.75)
+	
+	for m.estimateContextTokens() > threshold {
+		before := len(m.history)
+		m.compactHistory(3)
+		after := len(m.history)
+		
+		// If history stopped shrinking, break to avoid infinite loop
+		if after == before {
+			break
+		}
+		
+		m.history = append(m.history, ConversationTurn{
+			Role: "system",
+			Content: fmt.Sprintf(
+				"[ Auto-compacted: %d entr%s removed — context reached ≥85%% of %s token limit ]",
+				before-after,
+				map[bool]string{true: "y", false: "ies"}[before-after == 1],
+				formatNumber(m.cfg.ContextLimit),
+			),
+		})
+		m.statusMsg = fmt.Sprintf("Context auto-compacted (≥85%% of %s token limit)", formatNumber(m.cfg.ContextLimit))
+		
+		// Exit loop if under target budget
+		if m.estimateContextTokens() <= target {
+			break
+		}
 	}
-	before := len(m.history)
-	m.compactHistory(3)
-	after := len(m.history)
-	m.history = append(m.history, ConversationTurn{
-		Role: "system",
-		Content: fmt.Sprintf(
-			"[ Auto-compacted: %d entr%s removed — context reached ≥85%% of %s token limit ]",
-			before-after,
-			map[bool]string{true: "y", false: "ies"}[before-after == 1],
-			formatNumber(m.cfg.ContextLimit),
-		),
-	})
-	m.statusMsg = fmt.Sprintf("Context auto-compacted (≥85%% of %s token limit)", formatNumber(m.cfg.ContextLimit))
 }
 
 func NewModel(ctx context.Context, cfg Config) *Model {
@@ -579,7 +613,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				rawClean := strings.TrimSpace(raw)
 				m.lastQuery = rawClean
 				m.exactPhrases = rag.ExtractQuotedPhrases(rawClean)
-				if len(m.exactPhrases) > 0 {
+				// Check if we should use exact phrase search
+				// Exact search is triggered when:
+				// 1. /exact command was used (forceExactPhrase is true), OR
+				// 2. The entire query is a single quoted phrase (e.g., "exact phrase only")
+				shouldUseExact := m.forceExactPhrase || rag.IsFullyQuoted(rawClean)
+				
+				if shouldUseExact && len(m.exactPhrases) > 0 {
 					m.exactPhrase = m.exactPhrases[0]
 					m.output = ""
 					m.lastPoints = nil
@@ -592,6 +632,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.exactPhrase = ""
 					m.exactPhrases = nil
+					m.forceExactPhrase = false // Reset after each query
 					m.output = ""
 					m.lastPoints = nil
 					m.ragContext = ""
@@ -599,7 +640,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.state = stateEmbedding
 					m.statusMsg = "Generating embedding..."
 					m.updateViewport()
-					cmds = append(cmds, m.generateEmbeddingCmd(rawClean))
+					// Use condensed query for retrieval (with LLM rewrite or heuristic fallback)
+					condensedQuery := m.condenseQueryForRetrieval(m.ctx, rawClean)
+					cmds = append(cmds, m.generateEmbeddingCmd(condensedQuery))
 				}
 			}
 		}
@@ -634,7 +677,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastPoints = msg.points
 		m.state = stateStreaming
 		docCount := len(msg.points)
-		m.statusMsg = fmt.Sprintf("Generating response... (%d docs retrieved)", docCount)
+		if msg.degraded {
+			m.statusMsg = "Reranker unavailable — using vector ranking"
+		} else {
+			m.statusMsg = fmt.Sprintf("Generating response... (%d docs)", docCount)
+		}
 		cmds = append(cmds, m.startLLMStreamCmd())
 
 	case streamChunkMsg:

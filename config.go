@@ -29,10 +29,11 @@ type Config struct {
 	HTTPTimeoutSeconds   int    `json:"http_timeout_seconds,omitempty"`
 	SkillsRequireConfirm bool   `json:"skills_require_confirm,omitempty"`
 	// ContextLimit is the estimated token budget for the conversation history.
-	// When the conversation exceeds 85% of this limit, history is auto-compacted.
-	// Default: 131072 (128k). Set to 0 to disable auto-compaction entirely.
-	ContextLimit    int `json:"context_limit,omitempty"`
-	OpenAIMaxTokens int `json:"openai_max_tokens,omitempty"`
+	// Default: 131072 (128k). When the conversation exceeds 85% of this limit,
+	// history is auto-compacted. Set to 0 to disable auto-compaction entirely.
+	ContextLimit    int    `json:"context_limit,omitempty"`
+	QueryRewrite    string `json:"query_rewrite,omitempty"` // "llm", "heuristic", or "off"
+	OpenAIMaxTokens int    `json:"openai_max_tokens,omitempty"`
 }
 
 type configFile struct {
@@ -168,14 +169,30 @@ func LoadConfig(configName ...string) (Config, error) {
 	if cliSafe || os.Getenv("QQUESTIO_SKILLS_REQUIRE_CONFIRM") == "1" {
 		cfg.SkillsRequireConfirm = true
 	}
+	if val := os.Getenv("QUERY_REWRITE"); val != "" {
+		cfg.QueryRewrite = val
+	}
 
 	// Apply defaults
 	if cfg.HTTPTimeoutSeconds <= 0 {
 		cfg.HTTPTimeoutSeconds = 60
 	}
 
-	// Default ContextLimit and OpenAIMaxTokens to 0 (disabled/no limit) when not explicitly set.
-	// Users can define them in config.json or environment variables if they want specific limits.
+	// Default ContextLimit to 131072 (128k) when not explicitly set.
+	// Set to 0 to disable auto-compaction entirely.
+	if cfg.ContextLimit == 0 {
+		cfg.ContextLimit = 131072
+	}
+
+	// Default OpenAIMaxTokens to 0 (no limit) when not explicitly set.
+	if cfg.OpenAIMaxTokens == 0 {
+		cfg.OpenAIMaxTokens = 0
+	}
+
+	// Default QueryRewrite to "llm" when not explicitly set
+	if cfg.QueryRewrite == "" {
+		cfg.QueryRewrite = "llm"
+	}
 
 	// 3. Validate and construct super-clear error message if variables are missing
 	var missing []string

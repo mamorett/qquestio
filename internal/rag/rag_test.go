@@ -52,7 +52,7 @@ func TestSearchQdrant(t *testing.T) {
 	}))
 	defer server1.Close()
 
-	res1, pts1, err := SearchQdrant(context.Background(), server1.URL, "secret", "my-col", []float32{0.1}, 1000, 5, "", "")
+	res1, pts1, err := SearchQdrant(context.Background(), server1.URL, "secret", "my-col", []float32{0.1}, 1000, 5, "", "", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestSearchQdrant(t *testing.T) {
 	}))
 	defer server2.Close()
 
-	res2, pts2, err := SearchQdrant(context.Background(), server2.URL, "secret", "my-col", []float32{0.1}, 1000, 5, "", "")
+	res2, pts2, err := SearchQdrant(context.Background(), server2.URL, "secret", "my-col", []float32{0.1}, 1000, 5, "", "", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestSearchQdrant_Filter(t *testing.T) {
 	}))
 	defer serverDoc.Close()
 
-	_, _, err := SearchQdrant(context.Background(), serverDoc.URL, "secret", "my-col", []float32{0.1}, 1000, 5, "file_name", "guide.txt")
+	_, _, err := SearchQdrant(context.Background(), serverDoc.URL, "secret", "my-col", []float32{0.1}, 1000, 5, "file_name", "guide.txt", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestSearchQdrant_Filter(t *testing.T) {
 	}))
 	defer serverNonDoc.Close()
 
-	_, _, err = SearchQdrant(context.Background(), serverNonDoc.URL, "secret", "my-col", []float32{0.1}, 1000, 5, "chunk_index", "5")
+	_, _, err = SearchQdrant(context.Background(), serverNonDoc.URL, "secret", "my-col", []float32{0.1}, 1000, 5, "chunk_index", "5", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -353,11 +353,11 @@ func TestCorpusCache_SaveLoad(t *testing.T) {
 		{ID: float64(3), Payload: map[string]interface{}{"text": "goodbye", "file_name": "c.txt"}, Vector: []float32{0.5, 0.5, 0.5, 0.5}, Score: 0.1},
 	}
 
-	if err := SaveCorpusCache(collection, dim, points, ""); err != nil {
+	if err := SaveCorpusCache("http://localhost:6333", collection, dim, points, ""); err != nil {
 		t.Fatalf("SaveCorpusCache failed: %v", err)
 	}
 
-	cache, loaded, err := LoadCorpusCache(collection)
+	cache, loaded, err := LoadCorpusCache("http://localhost:6333", collection)
 	if err != nil {
 		t.Fatalf("LoadCorpusCache failed: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestCorpusCache_LoadMissing(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("QQUESTIO_CACHE_DIR", tmpDir)
 
-	cache, points, err := LoadCorpusCache("nonexistent_collection_xyz")
+	cache, points, err := LoadCorpusCache("http://localhost:6333", "nonexistent_collection_xyz")
 	if err != nil {
 		t.Errorf("expected nil error for missing cache, got %v", err)
 	}
@@ -422,19 +422,19 @@ func TestCorpusCache_Delete(t *testing.T) {
 	t.Setenv("QQUESTIO_CACHE_DIR", tmpDir)
 	collection := "test_collection-delete"
 
-	if err := SaveCorpusCache(collection, 2, []QdrantPoint{
+	if err := SaveCorpusCache("http://localhost:6333", collection, 2, []QdrantPoint{
 {ID: 1, Payload: map[string]interface{}{"x": "y"}, Vector: []float32{1, 0}},
 }, ""); err != nil {
 		t.Fatalf("SaveCorpusCache failed: %v", err)
 	}
 
 	// Delete should succeed.
-	if err := DeleteCorpusCache(collection); err != nil {
+	if err := DeleteCorpusCache("http://localhost:6333", collection); err != nil {
 		t.Fatalf("DeleteCorpusCache failed: %v", err)
 	}
 
 	// Subsequent load should return nil.
-	cache, _, err := LoadCorpusCache(collection)
+	cache, _, err := LoadCorpusCache("http://localhost:6333", collection)
 	if err != nil {
 		t.Fatalf("LoadCorpusCache after delete failed: %v", err)
 	}
@@ -443,7 +443,7 @@ func TestCorpusCache_Delete(t *testing.T) {
 	}
 
 	// Deleting again should be a no-op (no error).
-	if err := DeleteCorpusCache(collection); err != nil {
+	if err := DeleteCorpusCache("http://localhost:6333", collection); err != nil {
 		t.Errorf("second DeleteCorpusCache should not error, got %v", err)
 	}
 }
@@ -455,13 +455,13 @@ func TestCorpusCache_SafeName(t *testing.T) {
 	t.Setenv("QQUESTIO_CACHE_DIR", tmpDir)
 
 	collection := "my/unsafe name with spaces & symbols!@#"
-	if err := SaveCorpusCache(collection, 2, []QdrantPoint{
+	if err := SaveCorpusCache("http://localhost:6333", collection, 2, []QdrantPoint{
 {ID: 1, Payload: map[string]interface{}{"x": "y"}, Vector: []float32{1, 0}},
 }, ""); err != nil {
 		t.Fatalf("SaveCorpusCache with unsafe name failed: %v", err)
 	}
 
-	cache, _, err := LoadCorpusCache(collection)
+	cache, _, err := LoadCorpusCache("http://localhost:6333", collection)
 	if err != nil {
 		t.Fatalf("LoadCorpusCache with unsafe name failed: %v", err)
 	}

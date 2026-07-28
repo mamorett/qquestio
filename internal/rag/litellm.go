@@ -96,8 +96,79 @@ func StartLiteLLMStream(ctx context.Context, baseURL, apiKey, model string, maxT
 
 	return &SSEReader{
 		body:    resp.Body,
-		scanner: bufio.NewScanner(resp.Body),
+		scanner: func() *bufio.Scanner {
+			s := bufio.NewScanner(resp.Body)
+			// Set buffer size to handle large SSE messages (up to 4 MB)
+			// This prevents bufio.ErrTooLong when providers send large final usage chunks
+			s.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+			return s
+		}(),
 	}, nil
+}
+
+// ChatComplete sends a single non-streaming chat completion and returns the content.
+func ChatComplete(ctx context.Context, baseURL, apiKey, model string, messages []ChatMessage, maxTokens int) (string, error) {
+	url := AppendAPIPath(baseURL, "chat/completions")
+
+	reqBody := LiteLLMRequest{
+		Model:    model,
+		Messages: messages,
+		Stream:   false,
+	}
+
+	if maxTokens > 0 {
+		reqBody.MaxTokens = maxTokens
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal chat complete request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("failed to create chat complete request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("api-key", apiKey)
+	}
+
+	client := newHTTPClient(HTTPTimeout)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("chat complete HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("chat complete failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var response struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return "", fmt.Errorf("failed to decode chat complete response: %w", err)
+	}
+
+	if len(response.Choices) == 0 {
+		return "", fmt.Errorf("no choices in chat complete response")
+	}
+
+	content := strings.TrimSpace(response.Choices[0].Message.Content)
+	if content == "" {
+		return "", fmt.Errorf("empty content in chat complete response")
+	}
+
+	return content, nil
 }
 
 // Next reads one SSE chunk. Returns (content, reasoning, isDone, error).
@@ -106,7 +177,6 @@ func StartLiteLLMStream(ctx context.Context, baseURL, apiKey, model string, maxT
 func (r *SSEReader) Next() (string, string, bool, error) {
 	for r.scanner.Scan() {
 		line := r.scanner.Text()
-		log.Printf("[LLM Stream Line] %s", line)
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

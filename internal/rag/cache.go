@@ -2,7 +2,9 @@ package rag
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,6 +26,7 @@ import (
 // objects.
 type CorpusCache struct {
 	Collection     string    `json:"collection"`
+	ServerURL      string    `json:"server_url"`
 	Dimension      int       `json:"dimension"`
 	PointCount     int       `json:"point_count"`
 	CachedAt       time.Time `json:"cached_at"`
@@ -33,7 +36,7 @@ type CorpusCache struct {
 
 const (
 	cacheMagic   uint32 = 0x51434341 // "QQCA" in little-endian
-	cacheVersion uint8  = 2
+	cacheVersion uint8  = 3
 )
 
 // CacheDir returns the directory where corpus caches are stored.
@@ -72,15 +75,20 @@ func safeCollectionName(collection string) string {
 }
 
 // CachePath returns the absolute file path used to cache the given collection.
-func CachePath(collection string) string {
-	return filepath.Join(CacheDir(), safeCollectionName(collection)+".qcache")
+// The cache is keyed by both server URL and collection name to prevent
+// cross-contamination when using multiple Qdrant servers with the same collection names.
+func CachePath(baseURL, collection string) string {
+	// Create a safe filename: collection-name-serverurlhash.qcache
+	hash := sha1.Sum([]byte(baseURL))
+	hashStr := hex.EncodeToString(hash[:])[:10]
+	return filepath.Join(CacheDir(), safeCollectionName(collection)+"-"+hashStr+".qcache")
 }
 
 // LoadCorpusCache loads a cached corpus for the given collection.
 // Returns (nil, nil, nil) if the cache file does not exist (a normal case,
 // not an error). Returns an error only on actual I/O or format problems.
-func LoadCorpusCache(collection string) (*CorpusCache, []QdrantPoint, error) {
-	path := CachePath(collection)
+func LoadCorpusCache(baseURL, collection string) (*CorpusCache, []QdrantPoint, error) {
+	path := CachePath(baseURL, collection)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -88,11 +96,11 @@ func LoadCorpusCache(collection string) (*CorpusCache, []QdrantPoint, error) {
 		}
 		return nil, nil, fmt.Errorf("failed to read cache %s: %w", path, err)
 	}
-	return parseCacheBytes(collection, data)
+	return parseCacheBytes(baseURL, collection, data)
 }
 
 // parseCacheBytes decodes the binary cache file format.
-func parseCacheBytes(collection string, data []byte) (*CorpusCache, []QdrantPoint, error) {
+func parseCacheBytes(baseURL, collection string, data []byte) (*CorpusCache, []QdrantPoint, error) {
 	if len(data) < 4+1+8 {
 		return nil, nil, fmt.Errorf("cache file too short (%d bytes)", len(data))
 	}
@@ -130,6 +138,20 @@ func parseCacheBytes(collection string, data []byte) (*CorpusCache, []QdrantPoin
 	cachedCollection := string(nameBytes)
 	if cachedCollection != collection {
 		return nil, nil, fmt.Errorf("cache: collection mismatch (file=%q, requested=%q)", cachedCollection, collection)
+	}
+
+	// Read server URL (v3+)
+	var serverURLLen uint32
+	if err := binary.Read(r, binary.LittleEndian, &serverURLLen); err != nil {
+		return nil, nil, fmt.Errorf("cache: failed to read server URL length: %w", err)
+	}
+	serverURLBytes := make([]byte, serverURLLen)
+	if _, err := io.ReadFull(r, serverURLBytes); err != nil {
+		return nil, nil, fmt.Errorf("cache: failed to read server URL: %w", err)
+	}
+	cachedServerURL := string(serverURLBytes)
+	if cachedServerURL != baseURL {
+		return nil, nil, fmt.Errorf("cache: server URL mismatch (file=%q, requested=%q)", cachedServerURL, baseURL)
 	}
 
 	var dim uint32
@@ -220,18 +242,19 @@ func parseCacheBytes(collection string, data []byte) (*CorpusCache, []QdrantPoin
 
 	cache := &CorpusCache{
 		Collection:     cachedCollection,
+		ServerURL:      cachedServerURL,
 		Dimension:      int(dim),
 		PointCount:     int(pointCount),
 		CachedAt:       time.Unix(tsUnix, 0),
 		FilterAtWarmup: filterAtWarmup,
-		filePath:       CachePath(collection),
+		filePath:       CachePath(baseURL, collection),
 	}
 	return cache, points, nil
 }
 
 // SaveCorpusCache persists a corpus to disk. All points must share the same
 // vector dimension. Existing cache files for the same collection are replaced.
-func SaveCorpusCache(collection string, dim int, points []QdrantPoint, filterAtWarmup string) error {
+func SaveCorpusCache(baseURL, collection string, dim int, points []QdrantPoint, filterAtWarmup string) error {
 	if len(points) == 0 {
 		return fmt.Errorf("refusing to save empty corpus")
 	}
@@ -253,6 +276,11 @@ func SaveCorpusCache(collection string, dim int, points []QdrantPoint, filterAtW
 	nameBytes := []byte(collection)
 	_ = binary.Write(&buf, binary.LittleEndian, uint32(len(nameBytes)))
 	buf.Write(nameBytes)
+
+	// Write server URL (v3+)
+	serverURLBytes := []byte(baseURL)
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(len(serverURLBytes)))
+	buf.Write(serverURLBytes)
 
 	_ = binary.Write(&buf, binary.LittleEndian, uint32(dim))
 	_ = binary.Write(&buf, binary.LittleEndian, uint64(len(points)))
@@ -296,7 +324,7 @@ func SaveCorpusCache(collection string, dim int, points []QdrantPoint, filterAtW
 	}
 
 	// Atomic write: write to temp file, then rename.
-	path := CachePath(collection)
+	path := CachePath(baseURL, collection)
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, buf.Bytes(), 0o644); err != nil {
 		return fmt.Errorf("failed to write cache temp file: %w", err)
@@ -310,8 +338,8 @@ func SaveCorpusCache(collection string, dim int, points []QdrantPoint, filterAtW
 
 // DeleteCorpusCache removes the cache file for the given collection.
 // Returns nil if the file does not exist.
-func DeleteCorpusCache(collection string) error {
-	path := CachePath(collection)
+func DeleteCorpusCache(baseURL, collection string) error {
+	path := CachePath(baseURL, collection)
 	err := os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -321,8 +349,8 @@ func DeleteCorpusCache(collection string) error {
 
 // CacheInfo returns a human-readable summary of a cache file (or empty string
 // if no cache exists). Used by the `/cache status` slash command.
-func CacheInfo(collection string) (string, error) {
-	path := CachePath(collection)
+func CacheInfo(baseURL, collection string) (string, error) {
+	path := CachePath(baseURL, collection)
 	fi, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -330,7 +358,7 @@ func CacheInfo(collection string) (string, error) {
 		}
 		return "", err
 	}
-	cache, _, err := LoadCorpusCache(collection)
+	cache, _, err := LoadCorpusCache(baseURL, collection)
 	if err != nil {
 		return fmt.Sprintf("cache file present (%s) but failed to parse: %v", formatBytes(fi.Size()), err), nil
 	}
@@ -356,4 +384,29 @@ func formatBytes(n int64) string {
 	default:
 		return fmt.Sprintf("%d B", n)
 	}
+}
+
+// IsCacheStale checks if a cache is stale based on multiple criteria:
+// - Dimension mismatch (query vector dimension != cached dimension)
+// - Filter at warmup (cache was created with a filter, making it a subset)
+// - TTL expiration (if ttl > 0 and cache is older than ttl)
+// - Point count mismatch (if liveCount > 0 and differs from cached count)
+func (c *CorpusCache) IsStale(queryDim int, liveCount int, ttl time.Duration) bool {
+	// Dimension mismatch is always stale
+	if c.Dimension != queryDim {
+		return true
+	}
+	// Filter at warmup means cache is a subset - always stale
+	if c.FilterAtWarmup != "" {
+		return true
+	}
+	// TTL expiration
+	if ttl > 0 && time.Since(c.CachedAt) > ttl {
+		return true
+	}
+	// Point count mismatch
+	if liveCount > 0 && c.PointCount != liveCount {
+		return true
+	}
+	return false
 }

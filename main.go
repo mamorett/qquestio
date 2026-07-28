@@ -9,11 +9,14 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"qquestio/internal/rag"
 )
 
 var (
 	cliSearchCap = -1
 	cliSafe      = false
+	debugFlag    = false
 )
 
 func main() {
@@ -39,6 +42,7 @@ func main() {
 	// Parse version flags
 	versionFlag := flag.Bool("version", false, "Print version information and exit")
 	vFlag := flag.Bool("v", false, "Print version information and exit")
+	debugFlagPtr := flag.Bool("debug", false, "Enable debug logging to file")
 	searchCapFlag := flag.Int("search-cap", -1, "Maximum candidate pool for Qdrant search (-1 = no CLI override, 0 = no cap, N = cap to N)")
 	safeFlag := flag.Bool("safe", false, "Require user confirmation before executing any local skills/tools")
 	confFlag := flag.String("conf", "", "Configuration profile to load from config file")
@@ -46,15 +50,20 @@ func main() {
 
 	cliSearchCap = *searchCapFlag
 	cliSafe = *safeFlag
+	debugFlag = *debugFlagPtr
 
 	if *versionFlag || *vFlag {
 		fmt.Printf("QQuestio version v%s\n", Version)
 		os.Exit(0)
 	}
 
-	// Set up file-based logging to prevent stdout corruption
-	if f, err := tea.LogToFile("debug.log", "qquestio"); err == nil {
-		defer f.Close()
+	// Only enable file-based logging when --debug flag or QQUESTIO_DEBUG=1 is set
+	// This prevents unbounded log growth and protects user privacy
+	debugEnabled := debugFlag || os.Getenv("QQUESTIO_DEBUG") == "1"
+	if debugEnabled {
+		if f, err := tea.LogToFile(getLogFilePath(), "qquestio"); err == nil {
+			defer f.Close()
+		}
 	}
 
 	cfg, err := LoadConfig(*confFlag)
@@ -109,4 +118,16 @@ func main() {
 			}
 		}
 	}
+}
+
+// getLogFilePath returns the path for debug log files.
+// Logs are written to the cache directory instead of CWD to prevent
+// polluting the working directory and to centralize log management.
+func getLogFilePath() string {
+	// Use the same cache directory as the RAG package
+	if cacheDir := rag.CacheDir(); cacheDir != "" {
+		return cacheDir + "/qquestio-debug.log"
+	}
+	// Fallback to current directory if cache dir is unavailable
+	return "debug.log"
 }

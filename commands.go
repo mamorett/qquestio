@@ -23,6 +23,91 @@ func (m *Model) generateEmbeddingCmd(query string) tea.Cmd {
 	}
 }
 
+// condenseQueryForRetrieval returns the query text to embed for retrieval.
+// It implements a three-layer fallback strategy:
+// 1. LLM rewrite (default when history exists)
+// 2. Heuristic fallback (pronoun detection)
+// 3. Raw query passthrough
+func (m *Model) condenseQueryForRetrieval(ctx context.Context, raw string) string {
+	// Layer 3: No rewrite if disabled or no history
+	if m.cfg.QueryRewrite == "off" || len(m.history) == 0 {
+		return raw
+	}
+
+	// Layer 1: LLM rewrite (default)
+	if m.cfg.QueryRewrite == "llm" {
+		// Build messages for LLM rewrite
+		var messages []rag.ChatMessage
+		messages = append(messages, rag.ChatMessage{
+			Role: "system",
+			Content: "Rewrite the user's follow-up question as a single standalone search question that contains all necessary context. Output ONLY the rewritten question, no quotes, no commentary. If the question is already standalone, output it unchanged.",
+		})
+
+		// Add last few turns (up to 4)
+		startIdx := 0
+		if len(m.history) > 4 {
+			startIdx = len(m.history) - 4
+		}
+		for i := startIdx; i < len(m.history); i++ {
+			turn := m.history[i]
+			if turn.Role == "user" || turn.Role == "assistant" {
+				content := turn.Content
+				if len(content) > 500 {
+					content = content[:500]
+				}
+				messages = append(messages, rag.ChatMessage{
+					Role:    turn.Role,
+					Content: content,
+				})
+			}
+		}
+		messages = append(messages, rag.ChatMessage{
+			Role:    "user",
+			Content: raw,
+		})
+
+		// Call LLM with timeout
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+
+		rewritten, err := rag.ChatComplete(ctx, m.cfg.OpenAIURL, m.cfg.OpenAIAPIKey, m.cfg.OpenAIModel, messages, 128)
+		if err == nil && rewritten != "" && !strings.Contains(rewritten, "\n") {
+			return rewritten
+		}
+		// Fall through to heuristic on error or empty result
+	}
+
+	// Layer 2: Heuristic fallback
+	// Check if query is "follow-up shaped"
+	isFollowUp := false
+	fields := strings.Fields(raw)
+	if len(fields) <= 8 {
+		isFollowUp = true
+	} else {
+		lower := strings.ToLower(raw)
+		followUpKeywords := []string{"it", "its", "this", "that", "these", "those", "he", "she", "they", "them",
+			"his", "her", "their", "above", "earlier", "previous", "more", "also", "and what", "what about"}
+		for _, kw := range followUpKeywords {
+			if strings.Contains(lower, kw) {
+				isFollowUp = true
+				break
+			}
+		}
+	}
+
+	if isFollowUp {
+		// Find previous user turn
+		for i := len(m.history) - 1; i >= 0; i-- {
+			if m.history[i].Role == "user" {
+				return m.history[i].Content + "\n" + raw
+			}
+		}
+	}
+
+	// Default: return raw query
+	return raw
+}
+
 // searchQdrantCmd (Stage 2) performs similarity search against Qdrant collection
 // with query-time context expansion.
 //
@@ -133,16 +218,20 @@ func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 		// already approximate and the expansion would still be
 		// corpus-wide, so we just call SearchQdrant directly. We still
 		// pass the expand=0 so the message shape is uniform downstream.
+		// Honor /search exact in the capped path for exact scoring over
+		// the capped candidate pool.
 		if m.searchCap > 0 && m.exactPhrase == "" {
 			candidateLimit := m.searchCap
 			if candidateLimit < searchDocs {
 				candidateLimit = searchDocs
 			}
+			exact := m.searchMode == "exact"
 			results, points, err := rag.SearchQdrant(
 				m.ctx, m.cfg.QdrantURL, m.cfg.QdrantAPIKey,
 				m.collection, vector,
 				candidateLimit, searchDocs,
 				m.filterKey, m.filterValue,
+				exact,
 			)
 			if err != nil {
 				return appErrMsg{err: err, reason: "Qdrant search failed", stage: "search"}
@@ -171,7 +260,7 @@ func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 			}
 			m.cacheForceRefresh = false
 			if fromCache {
-				if cache, _, cerr := rag.LoadCorpusCache(m.collection); cerr == nil && cache != nil {
+				if cache, _, cerr := rag.LoadCorpusCache(m.cfg.QdrantURL, m.collection); cerr == nil && cache != nil {
 					age := time.Since(cache.CachedAt).Truncate(time.Second)
 					m.cacheInfo = fmt.Sprintf("✓ %s pts (%s old)", formatNumber(cache.PointCount), age)
 					m.cacheFilterAtWarmup = cache.FilterAtWarmup
@@ -184,15 +273,22 @@ func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 		// We use the detailed version so the rerank step can rerank only
 		// the primary top-N (not the already-expanded set) and re-apply
 		// ±expand around the reranked top-K.
+		// In "auto" mode (default), we use exact=true when uncapped to match
+		// documented behavior: exact brute-force when cap=0, HNSW when capped.
+		exact := m.searchMode == "exact" || m.searchMode == "auto"
 		res, err := rag.SearchWithContextExpansionDetailed(
 			m.ctx, m.cfg.QdrantURL, m.cfg.QdrantAPIKey,
 			m.collection, vector,
 			searchDocs, expand,
 			m.filterKey, m.filterValue,
-			m.searchMode == "exact",
+			exact,
 		)
 		if err != nil {
 			return appErrMsg{err: err, reason: "Qdrant context-expanded search failed", stage: "search"}
+		}
+		// Boost phrase matches if there are quoted phrases (but not full exact search)
+		if len(m.exactPhrases) > 0 && !m.forceExactPhrase {
+			res.PrimaryPoints = rag.BoostPhraseMatches(res.PrimaryPoints, m.exactPhrases)
 		}
 		return searchResultMsg{
 			context:       res.Context,
@@ -223,7 +319,7 @@ func (m *Model) fetchQdrantInfoCmd() tea.Cmd {
 // updates the header bar so the user knows whether the cache is warm.
 func (m *Model) preloadCacheInfoCmd() tea.Cmd {
 	return func() tea.Msg {
-		cache, _, err := rag.LoadCorpusCache(m.collection)
+		cache, _, err := rag.LoadCorpusCache(m.cfg.QdrantURL, m.collection)
 		if err != nil || cache == nil {
 			return cachePreloadMsg{found: false}
 		}
@@ -276,40 +372,29 @@ func (m *Model) receiveStreamChunkCmd() tea.Cmd {
 }
 
 // warmupCacheCmd scrolls the entire Qdrant collection and persists it to the
-// on-disk cache. This is triggered by `/cache warmup` so subsequent offline
-// queries can be served from cache. On completion it transitions back to idle.
+// on-disk cache. This is triggered by `/cache warmup` so subsequent queries
+// can be served from cache. On completion it transitions back to idle.
 func (m *Model) warmupCacheCmd() tea.Cmd {
 	return func() tea.Msg {
-		// Use a zero-vector to satisfy the function signature; we don't
-		// actually need a query for cache warmup. We just scroll + save.
-		dummyVector := make([]float32, 0)
-
-		// We need the embedding dimension from the collection to build
-		// a proper dummy vector. Fetch one point to discover it.
-		_, _, _, err := rag.SearchQdrantFullCorpus(
+		cache, err := rag.WarmupCorpusCache(
 			m.ctx, m.cfg.QdrantURL, m.cfg.QdrantAPIKey,
-			m.collection, dummyVector,
-			1,
-			"", "",
-			m.qdrantPoints,
-			true, // force refresh
-			nil,
-			"", // exactMatch
+			m.collection,
+			func(processed, total int) {
+				// Progress callback - could update status if needed
+			},
 		)
 		if err != nil {
 			return appErrMsg{err: err, reason: "Cache warmup failed", stage: "search"}
 		}
 
-		// Read back the cache to update the header info.
-		if cache, _, cerr := rag.LoadCorpusCache(m.collection); cerr == nil && cache != nil {
-			age := time.Since(cache.CachedAt).Truncate(time.Second)
-			m.cacheInfo = fmt.Sprintf("✓ %s pts (%s old)", formatNumber(cache.PointCount), age)
-			m.cacheFilterAtWarmup = cache.FilterAtWarmup
-		}
+		// Update the header info with the new cache.
+		age := time.Since(cache.CachedAt).Truncate(time.Second)
+		m.cacheInfo = fmt.Sprintf("✓ %s pts (%s old)", formatNumber(cache.PointCount), age)
+		m.cacheFilterAtWarmup = cache.FilterAtWarmup
 
 		return systemLogMsg{
-			content:  fmt.Sprintf("Cache warmup complete for collection '%s'", m.collection),
-			feedback: fmt.Sprintf("Cache warmed for %s", m.collection),
+			content:  fmt.Sprintf("Cache warmup complete for collection '%s' (%s points)", m.collection, formatNumber(cache.PointCount)),
+			feedback: fmt.Sprintf("Cache warmed for %s (%s points)", m.collection, formatNumber(cache.PointCount)),
 		}
 	}
 }
@@ -370,22 +455,22 @@ func (m *Model) rerankPointsCmd(result searchResultMsg) tea.Cmd {
 			primaries = primaries[:rerankCap]
 		}
 
-		// Extract texts for reranking. To ensure the reranker has the EXACT SAME
-		// context quality as the non-reranked path, we apply the chunk expansion
-		// (±N adjacent chunks) to each primary candidate BEFORE scoring. This prevents
-		// the reranker from degrading due to missing context.
+		// Extract texts for reranking using only the primary text (not expanded).
+		// This reduces token volume and avoids sending duplicate adjacent chunks.
 		var texts []string
-		for _, pt := range primaries {
-			expandedCtx, _ := rag.ApplyExpansionToPrimaries(
-				[]rag.QdrantPoint{pt},
-				result.expansionMap,
-				result.expand,
-			)
-			// Fallback if expansion fails (e.g. no chunk index)
-			if expandedCtx == "" {
-				expandedCtx = pt.ExtractText()
+		var validIndices []int
+		for i, pt := range primaries {
+			primaryText := pt.ExtractPrimaryText()
+			if primaryText == "" {
+				// Skip candidates with empty primary text
+				continue
 			}
-			texts = append(texts, expandedCtx)
+			texts = append(texts, primaryText)
+			validIndices = append(validIndices, i)
+		}
+
+		if len(texts) == 0 {
+			return rerankResultMsg{context: "", points: primaries, degraded: true}
 		}
 
 		rerankItems, err := rag.Rerank(
@@ -397,13 +482,15 @@ func (m *Model) rerankPointsCmd(result searchResultMsg) tea.Cmd {
 			texts,
 		)
 		if err != nil {
-			return appErrMsg{err: err, reason: fmt.Sprintf("Reranker query failed: %v", err), stage: "rerank"}
+			// Graceful degradation: return original points unchanged when reranker is unavailable.
+			return rerankResultMsg{context: "", points: primaries, degraded: true}
 		}
 
-		// Map rerank scores back to the primaries slice.
+		// Map rerank scores back to the primaries slice using validIndices.
 		scoreMap := make(map[int]float64)
-		for _, item := range rerankItems {
-			scoreMap[item.Index] = item.Score
+		for i, item := range rerankItems {
+			originalIdx := validIndices[i]
+			scoreMap[originalIdx] = item.Score
 		}
 
 		// Sort the primaries by rerank score descending.
@@ -509,7 +596,14 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 			msgs = append(msgs, rag.ChatMessage{Role: "user", Content: "Question: " + turn.Content})
 		} else if turn.Role == "assistant" {
 			msgs = append(msgs, rag.ChatMessage{Role: "assistant", Content: turn.Content})
+		} else if turn.Role == "system" && strings.HasPrefix(turn.Content, "[ Context compacted") {
+			// Include compaction summaries as user messages (not system) for better compatibility
+			msgs = append(msgs, rag.ChatMessage{
+				Role: "user",
+				Content: "[ Summary of earlier conversation ]\n" + turn.Content,
+			})
 		}
+		// Other system turns (slash feedback, warmup logs, skill logs) remain UI-only
 	}
 
 	// 3. Current user query with RAG context injected as structured chunks

@@ -100,12 +100,14 @@ func TestLoadConfig_JSONConfig(t *testing.T) {
 		t.Errorf("expected QDRANT_API_KEY to be overridden by system env, got %s", cfg.QdrantAPIKey)
 	}
 
-	// 3. OpenAIMaxTokens & ContextLimit defaults validation (should be 0 when undefined)
+	// 3. OpenAIMaxTokens & ContextLimit defaults validation
+	// OpenAIMaxTokens should be 0 when undefined (no limit)
 	if cfg.OpenAIMaxTokens != 0 {
 		t.Errorf("expected default OpenAIMaxTokens to be 0, got %d", cfg.OpenAIMaxTokens)
 	}
-	if cfg.ContextLimit != 0 {
-		t.Errorf("expected default ContextLimit to be 0, got %d", cfg.ContextLimit)
+	// ContextLimit should default to 131072 (128k) when not explicitly set
+	if cfg.ContextLimit != 131072 {
+		t.Errorf("expected default ContextLimit to be 131072, got %d", cfg.ContextLimit)
 	}
 
 	// 4. Honoring exact values check

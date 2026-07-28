@@ -27,8 +27,9 @@ type searchResultMsg struct {
 // the reranked + re-expanded set so the LLM sees the full document context
 // around the reranked top-K, not just the top-K fragments.
 type rerankResultMsg struct {
-	context string            // Concatenated text payloads after rerank + re-expansion
-	points  []rag.QdrantPoint // Sorted, re-expanded points list
+	context  string            // Concatenated text payloads after rerank + re-expansion
+	points   []rag.QdrantPoint // Sorted, re-expanded points list
+	degraded bool              // True if reranker was unavailable (fallback to vector ranking)
 }
 
 // streamChunkMsg is Phase 3 (Stage 3): one chunk from LiteLLM SSE stream.

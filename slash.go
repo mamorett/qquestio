@@ -129,6 +129,48 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 			}
 			m.ragMode = newMode
 			return slashResultMsg{feedback: fmt.Sprintf("RAG mode → %s", newMode)}
+		case "/rewrite":
+			if len(args) == 0 {
+				return slashResultMsg{feedback: fmt.Sprintf("Query rewrite mode → %s", m.cfg.QueryRewrite)}
+			}
+			arg := strings.ToLower(strings.TrimSpace(args[0]))
+			switch arg {
+			case "llm":
+				m.cfg.QueryRewrite = "llm"
+				return slashResultMsg{feedback: "Query rewrite mode → llm (use LLM to rewrite follow-up questions)"}
+			case "heuristic":
+				m.cfg.QueryRewrite = "heuristic"
+				return slashResultMsg{feedback: "Query rewrite mode → heuristic (use pronoun detection for follow-ups)"}
+			case "off":
+				m.cfg.QueryRewrite = "off"
+				return slashResultMsg{feedback: "Query rewrite mode → off (use raw queries)"}
+			default:
+				return appErrMsg{
+					err:    fmt.Errorf("/rewrite must be 'llm', 'heuristic', or 'off'"),
+					reason: "Usage: /rewrite [llm|heuristic|off]",
+					stage:  "slash",
+				}
+			}
+		case "/exact":
+			if len(args) == 0 {
+				return appErrMsg{
+					err:    fmt.Errorf("/exact requires at least one argument"),
+					reason: "Usage: /exact <phrase...>",
+					stage:  "slash",
+				}
+			}
+			phrase := strings.Join(args, " ")
+			m.exactPhrases = []string{phrase}
+			m.exactPhrase = phrase
+			m.forceExactPhrase = true
+			// Immediately submit the exact search
+			m.lastQuery = phrase
+			m.output = ""
+			m.lastPoints = nil
+			m.ragContext = ""
+			m.state = stateSearching
+			m.statusMsg = "Searching exact string..."
+			return m.searchQdrantCmd(nil)
 		case "/search":
 			if len(args) == 0 {
 				return slashResultMsg{feedback: fmt.Sprintf("Search mode → %s", m.searchMode)}
@@ -222,7 +264,7 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 
 		case "/cache":
 			if len(args) == 0 || args[0] == "status" {
-				info, err := rag.CacheInfo(m.collection)
+				info, err := rag.CacheInfo(m.cfg.QdrantURL, m.collection)
 				if err != nil {
 					return appErrMsg{err: err, reason: "Failed to read cache info", stage: "slash"}
 				}
@@ -240,7 +282,7 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				return warmupCacheMsg{}
 			}
 			if args[0] == "clear" {
-				if err := rag.DeleteCorpusCache(m.collection); err != nil {
+				if err := rag.DeleteCorpusCache(m.cfg.QdrantURL, m.collection); err != nil {
 					return appErrMsg{err: err, reason: "Failed to delete cache", stage: "slash"}
 				}
 				m.cacheInfo = ""
