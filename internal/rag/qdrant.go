@@ -173,11 +173,11 @@ func (q *QdrantQueryResponse) UnmarshalJSON(data []byte) error {
 //
 // Request:  POST /collections/{collection}/points/query
 //
-//	{ "query": vector, "limit": candidateLimit, "with_payload": true }
+//	{ "query": vector, "limit": candidateLimit, "with_payload": true, "params": {"exact": true/false} }
 //
 // Response: Extract ONLY the text field from each point's payload.
 // Returns:  Concatenated text payloads separated by "\n---\n", the points list (truncated to docs), and an error if any.
-func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vector []float32, candidateLimit, docs int, filterKey, filterValue string) (string, []QdrantPoint, error) {
+func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vector []float32, candidateLimit, docs int, filterKey, filterValue string, exact bool) (string, []QdrantPoint, error) {
 	url := fmt.Sprintf("%s/collections/%s/points/query", strings.TrimSuffix(baseURL, "/"), collection)
 
 	var filter *QdrantFilter
@@ -221,6 +221,9 @@ func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vecto
 		Filter:      filter,
 		Limit:       candidateLimit,
 		WithPayload: true,
+	}
+	if exact {
+		reqBody.Params = &QdrantSearchParams{Exact: true}
 	}
 
 	jsonData, err := json.Marshal(reqBody)
@@ -434,6 +437,17 @@ type ScrollResponse struct {
 // cheap and non-blocking.
 type ProgressFunc func(processed, total int)
 
+// SearchQdrantFullCorpusOpts options for full-corpus search.
+type SearchQdrantFullCorpusOpts struct {
+	FilterKey      string
+	FilterValue    string
+	LivePointCount int
+	ForceRefresh   bool
+	TTL            time.Duration // Cache TTL (0 = use default 7 days)
+	Progress       ProgressFunc
+	ExactMatch     string
+}
+
 func SearchQdrantFullCorpus(
 	ctx context.Context,
 	baseURL, apiKey, collection string,
@@ -445,26 +459,46 @@ func SearchQdrantFullCorpus(
 	progress ProgressFunc,
 	exactMatch string,
 ) (string, []QdrantPoint, bool, error) {
+	return SearchQdrantFullCorpusOptsImpl(ctx, baseURL, apiKey, collection, vector, docs, &SearchQdrantFullCorpusOpts{
+		FilterKey:      filterKey,
+		FilterValue:    filterValue,
+		LivePointCount: livePointCount,
+		ForceRefresh:   forceRefresh,
+		Progress:       progress,
+		ExactMatch:     exactMatch,
+	})
+}
+
+// SearchQdrantFullCorpusOptsImpl implements full-corpus search with options struct.
+func SearchQdrantFullCorpusOptsImpl(
+	ctx context.Context,
+	baseURL, apiKey, collection string,
+	vector []float32,
+	docs int,
+	opts *SearchQdrantFullCorpusOpts,
+) (string, []QdrantPoint, bool, error) {
+	// Set default TTL to 7 days if not specified
+	ttl := opts.TTL
+	if ttl == 0 {
+		ttl = 7 * 24 * time.Hour
+	}
+
 	// 1. Try the on-disk cache first (unless caller forced a refresh).
-	if !forceRefresh {
-		cache, cachedPoints, err := LoadCorpusCache(collection)
+	if !opts.ForceRefresh {
+		cache, cachedPoints, err := LoadCorpusCache(baseURL, collection)
 		if err == nil && cache != nil {
-			// Stale check: if the live count differs from the cached count
-			// (and we actually have a live count), the cache is stale.
-			stale := false
-			if livePointCount > 0 && cache.PointCount != livePointCount {
-				stale = true
-			}
+			// Stale check using comprehensive criteria
+			stale := cache.IsStale(len(vector), opts.LivePointCount, ttl)
 			if !stale && len(cachedPoints) > 0 {
 				// Cache hit!
-				filtered := applyFilter(cachedPoints, filterKey, filterValue)
-				if exactMatch != "" {
-					filtered = applyExactMatch(filtered, exactMatch)
+				filtered := applyFilter(cachedPoints, opts.FilterKey, opts.FilterValue)
+				if opts.ExactMatch != "" {
+					filtered = applyExactMatch(filtered, opts.ExactMatch)
 				}
 				// Compute top-N by cosine similarity.
 				top, err := topNByCosine(vector, filtered, docs, func(p, total int) {
-					if progress != nil {
-						progress(p, total)
+					if opts.Progress != nil {
+						opts.Progress(p, total)
 					}
 				})
 				if err != nil {
@@ -480,7 +514,7 @@ func SearchQdrantFullCorpus(
 	}
 
 	// 2. Cache miss / stale / forced: scroll the entire collection from Qdrant.
-	points, err := scrollAllPoints(ctx, baseURL, apiKey, collection, filterKey, filterValue, progress)
+	points, err := scrollAllPoints(ctx, baseURL, apiKey, collection, opts.FilterKey, opts.FilterValue, opts.Progress)
 	if err != nil {
 		return "", nil, false, fmt.Errorf("full-corpus scroll failed: %w", err)
 	}
@@ -489,30 +523,28 @@ func SearchQdrantFullCorpus(
 	}
 
 	// 3. Persist to cache (best effort; don't fail the search if the disk is full).
+	// Skip cache save when filtering is active to avoid caching a subset.
 	dim := len(vector)
 	if dim == 0 && len(points) > 0 {
 		dim = len(points[0].Vector)
 	}
-	if dim > 0 {
+	if dim > 0 && opts.FilterKey == "" && opts.FilterValue == "" {
 		filterAtWarmup := ""
-		if filterKey != "" && filterValue != "" {
-			filterAtWarmup = filterKey + "=" + filterValue
-		}
-		_ = SaveCorpusCache(collection, dim, points, filterAtWarmup)
+		_ = SaveCorpusCache(baseURL, collection, dim, points, filterAtWarmup)
 	}
 
 	// 4. Compute top-N.
 	total := len(points)
-	if progress != nil {
-		progress(total, total)
+	if opts.Progress != nil {
+		opts.Progress(total, total)
 	}
 	filtered := points
-	if exactMatch != "" {
-		filtered = applyExactMatch(filtered, exactMatch)
+	if opts.ExactMatch != "" {
+		filtered = applyExactMatch(filtered, opts.ExactMatch)
 	}
 	top, err := topNByCosine(vector, filtered, docs, func(p, _ int) {
-		if progress != nil {
-			progress(p, total)
+		if opts.Progress != nil {
+			opts.Progress(p, total)
 		}
 	})
 	if err != nil {
@@ -523,6 +555,38 @@ func SearchQdrantFullCorpus(
 	}
 	texts := extractTexts(top)
 	return strings.Join(texts, "\n---\n"), top, false, nil
+}
+
+// WarmupCorpusCache scrolls the full collection (no filter) and persists the canonical cache.
+// No query vector is needed; scoring is not performed.
+func WarmupCorpusCache(ctx context.Context, baseURL, apiKey, collection string, progress ProgressFunc) (*CorpusCache, error) {
+	points, err := scrollAllPoints(ctx, baseURL, apiKey, collection, "", "", progress)
+	if err != nil {
+		return nil, fmt.Errorf("warmup scroll failed: %w", err)
+	}
+	if len(points) == 0 {
+		return nil, fmt.Errorf("collection is empty")
+	}
+
+	// Derive dimension from the first point's vector
+	dim := len(points[0].Vector)
+	if dim == 0 {
+		return nil, fmt.Errorf("first point has empty vector")
+	}
+
+	// Save the cache
+	filterAtWarmup := ""
+	if err := SaveCorpusCache(baseURL, collection, dim, points, filterAtWarmup); err != nil {
+		// Don't fail the warmup if cache save fails - just log it
+		return nil, fmt.Errorf("failed to save cache: %w", err)
+	}
+
+	// Load and return the cache info
+	cache, _, err := LoadCorpusCache(baseURL, collection)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load saved cache: %w", err)
+	}
+	return cache, nil
 }
 
 // scrollAllPoints streams every point in the collection from Qdrant's
@@ -1004,7 +1068,9 @@ func GetCollectionInfo(ctx context.Context, baseURL, apiKey, collection string) 
 						selected = names[0] // fallback to first alphabetically
 					}
 					QdrantVectorName = selected
-					log.Printf("[Qdrant] Auto-selected vector name: %q from available: %v", QdrantVectorName, names)
+					if VerboseLogging {
+						log.Printf("[Qdrant] Auto-selected vector name: %q from available: %v", QdrantVectorName, names)
+					}
 				}
 			}
 		}
@@ -1068,6 +1134,69 @@ func extractDocID(p QdrantPoint) string {
 		}
 	}
 	return ""
+}
+
+// IsFullyQuoted checks if the entire trimmed string is a single quoted phrase.
+// Returns true if the first and last runes form a recognized quote pair.
+func IsFullyQuoted(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) < 2 {
+		return false
+	}
+	runes := []rune(s)
+	openRune := runes[0]
+	closeRune := runes[len(runes)-1]
+
+	// Recognized quote pairs
+	switch openRune {
+	case '"':
+		return closeRune == '"'
+	case '\'':
+		return closeRune == '\''
+	case '«':
+		return closeRune == '»'
+	case '„':
+		return closeRune == '"' || closeRune == '”'
+	case '“':
+		return closeRune == '"' || closeRune == '”'
+	case '‹':
+		return closeRune == '›'
+	case '《':
+		return closeRune == '》'
+	}
+	return false
+}
+
+// BoostPhraseMatches reorders points so that those containing all quoted phrases
+// (case-insensitive) come first, preserving their relative score order.
+// If no chunk contains the phrases, returns the original slice unchanged.
+func BoostPhraseMatches(points []QdrantPoint, phrases []string) []QdrantPoint {
+	if len(phrases) == 0 || len(points) == 0 {
+		return points
+	}
+
+	// Stable partition: matching points first, non-matching second
+	matching := make([]QdrantPoint, 0, len(points))
+	nonMatching := make([]QdrantPoint, 0, len(points))
+
+	for _, pt := range points {
+		text := strings.ToLower(pt.ExtractText())
+		allMatch := true
+		for _, phrase := range phrases {
+			if !strings.Contains(text, strings.ToLower(phrase)) {
+				allMatch = false
+				break
+			}
+		}
+		if allMatch {
+			matching = append(matching, pt)
+		} else {
+			nonMatching = append(nonMatching, pt)
+		}
+	}
+
+	// Return concatenated: matching first, then non-matching
+	return append(matching, nonMatching...)
 }
 
 // extractChunkIndex returns the chunk's positional index within its document,
@@ -1865,13 +1994,13 @@ func SearchQdrantExactPhrases(
 		return "", nil, fmt.Errorf("scroll failed: %w", err)
 	}
 
-	// 4. Strict client-side scan for all phrases (case-sensitive).
+	// 4. Strict client-side scan for all phrases (case-insensitive).
 	var matched []QdrantPoint
 	for _, p := range points {
-		text := p.ExtractText()
+		text := strings.ToLower(p.ExtractText())
 		match := true
 		for _, ph := range phrases {
-			if !strings.Contains(text, ph) {
+			if !strings.Contains(text, strings.ToLower(ph)) {
 				match = false
 				break
 			}

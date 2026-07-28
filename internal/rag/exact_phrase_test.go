@@ -91,7 +91,7 @@ func TestSearchQdrantExactPhrases(t *testing.T) {
 
 	ctx := context.Background()
 
-	t.Run("Case-sensitive exact match", func(t *testing.T) {
+	t.Run("Case-insensitive exact match uppercase", func(t *testing.T) {
 		fake.mu.Lock()
 		fake.scrolls = nil
 		fake.mu.Unlock()
@@ -104,8 +104,9 @@ func TestSearchQdrantExactPhrases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(pts) != 1 || pts[0].ID != float64(1) {
-			t.Errorf("expected only point 1, got points: %+v", pts)
+		// Case-insensitive: both "Needle" and "needle" should match
+		if len(pts) != 2 {
+			t.Errorf("expected 2 points (case-insensitive), got %d: %+v", len(pts), pts)
 		}
 
 		// Verify scroll request sent WithVector: false
@@ -132,7 +133,7 @@ func TestSearchQdrantExactPhrases(t *testing.T) {
 		}
 	})
 
-	t.Run("Another case-sensitive exact match", func(t *testing.T) {
+	t.Run("Case-insensitive exact match lowercase", func(t *testing.T) {
 		_, pts, err := SearchQdrantExactPhrases(
 			ctx, srv.URL, "secret", "col",
 			[]string{"needle"},
@@ -141,8 +142,9 @@ func TestSearchQdrantExactPhrases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(pts) != 1 || pts[0].ID != float64(2) {
-			t.Errorf("expected only point 2, got points: %+v", pts)
+		// Case-insensitive: both "Needle" and "needle" should match
+		if len(pts) != 2 {
+			t.Errorf("expected 2 points (case-insensitive), got %d: %+v", len(pts), pts)
 		}
 	})
 
