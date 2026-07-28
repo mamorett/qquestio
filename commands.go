@@ -13,9 +13,11 @@ import (
 )
 
 // generateEmbeddingCmd (Stage 1) calls llama.cpp to generate the embedding vector.
+// It first condenses/rewrites the query for conversational context if history exists.
 func (m *Model) generateEmbeddingCmd(query string) tea.Cmd {
 	return func() tea.Msg {
-		vector, err := rag.GetEmbedding(m.ctx, m.cfg.EmbeddingURL, m.cfg.EmbeddingAPIKey, m.cfg.EmbeddingModel, query)
+		retrievalQuery := m.condenseQueryForRetrieval(m.ctx, query)
+		vector, err := rag.GetEmbedding(m.ctx, m.cfg.EmbeddingURL, m.cfg.EmbeddingAPIKey, m.cfg.EmbeddingModel, retrievalQuery)
 		if err != nil {
 			return appErrMsg{err: err, reason: "Failed to generate embedding", stage: "embedding"}
 		}

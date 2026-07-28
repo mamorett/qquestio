@@ -640,9 +640,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.state = stateEmbedding
 					m.statusMsg = "Generating embedding..."
 					m.updateViewport()
-					// Use condensed query for retrieval (with LLM rewrite or heuristic fallback)
-					condensedQuery := m.condenseQueryForRetrieval(m.ctx, rawClean)
-					cmds = append(cmds, m.generateEmbeddingCmd(condensedQuery))
+					cmds = append(cmds, m.generateEmbeddingCmd(rawClean))
 				}
 			}
 		}
@@ -1318,12 +1316,17 @@ func (m *Model) getRenderedTurn(turn *ConversationTurn) string {
 		targetWidth = 20
 	}
 	if turn.RenderedContent == "" || turn.RenderedWidth != targetWidth {
-		content := turn.Content
+		var res string
 		if turn.Reasoning != "" {
-			// Use horizontal rule and code block for clear visual separation
-			content = "---\n\n**Thinking** (dimmed):\n\n```\n" + turn.Reasoning + "\n```\n\n---\n\n" + content
+			thinkingHeader := lipgloss.NewStyle().Foreground(nord3).Bold(true).Italic(true).Render("💭 Thinking...")
+			thinkingBody := lipgloss.NewStyle().Foreground(nord3).Italic(true).Render(turn.Reasoning)
+			divider := lipgloss.NewStyle().Foreground(nord3).Render(strings.Repeat("─", targetWidth))
+			res = thinkingHeader + "\n" + thinkingBody + "\n" + divider + "\n\n"
 		}
-		turn.RenderedContent = renderMarkdown(content, targetWidth)
+		if turn.Content != "" {
+			res += renderMarkdown(turn.Content, targetWidth)
+		}
+		turn.RenderedContent = res
 		turn.RenderedWidth = targetWidth
 	}
 	return turn.RenderedContent
@@ -1532,19 +1535,24 @@ func (m *Model) updateViewport() {
 	// Render currently streaming assistant reply
 	if m.state == stateStreaming {
 		if m.output != "" || m.reasoning != "" {
-			var currentText string
 			if m.reasoning != "" {
-				currentText = "---\n\n**Thinking** (dimmed):\n\n```\n" + m.reasoning + "\n```\n\n---\n\n"
+				thinkingHeader := lipgloss.NewStyle().Foreground(nord3).Bold(true).Italic(true).Render("💭 Thinking...")
+				thinkingBody := lipgloss.NewStyle().Foreground(nord3).Italic(true).Render(m.reasoning)
+				divider := lipgloss.NewStyle().Foreground(nord3).Render(strings.Repeat("─", m.viewport.Width))
+				sb.WriteString(thinkingHeader + "\n" + thinkingBody + "\n" + divider + "\n\n")
 			}
-			currentText += cleanLLMOutput(m.output)
+			currentText := cleanLLMOutput(m.output)
 
 			var streamingText string
 			if m.showRawSource {
 				streamingText = currentText
-			} else {
+			} else if currentText != "" {
 				streamingText = renderMarkdown(currentText, m.viewport.Width)
 			}
-			sb.WriteString(streamingText + "\n\n" + m.spinner.View() + lipgloss.NewStyle().Foreground(nord13).Render(" "+m.loadingMessage) + "\n")
+			if streamingText != "" {
+				sb.WriteString(streamingText + "\n\n")
+			}
+			sb.WriteString(m.spinner.View() + lipgloss.NewStyle().Foreground(nord13).Render(" "+m.loadingMessage) + "\n")
 		} else {
 			var cb strings.Builder
 			cb.WriteString(lipgloss.NewStyle().Foreground(nord14).Render("  ✔ Generated embedding vector") + "\n")

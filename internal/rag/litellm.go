@@ -85,7 +85,9 @@ func StartLiteLLMStream(ctx context.Context, baseURL, apiKey, model string, maxT
 		return nil, fmt.Errorf("HTTP stream request failed: %w", err)
 	}
 
-	log.Printf("[LLM] Connected to stream URL: %s, Status: %s, Content-Type: %s", url, resp.Status, resp.Header.Get("Content-Type"))
+	if VerboseLogging {
+		log.Printf("[LLM] Connected to stream URL: %s, Status: %s, Content-Type: %s", url, resp.Status, resp.Header.Get("Content-Type"))
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		// Read body for error details

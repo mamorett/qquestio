@@ -13,6 +13,10 @@ import (
 // It can be configured by the host application.
 var HTTPTimeout = 60 * time.Second
 
+// VerboseLogging enables detailed diagnostic logging from internal/rag routines.
+// Disabled by default to avoid corrupting terminal UI output.
+var VerboseLogging bool
+
 var (
 	sharedTransport   *http.Transport
 	initTransportOnce sync.Once

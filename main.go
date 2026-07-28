@@ -61,6 +61,7 @@ func main() {
 	// This prevents unbounded log growth and protects user privacy
 	debugEnabled := debugFlag || os.Getenv("QQUESTIO_DEBUG") == "1"
 	if debugEnabled {
+		rag.VerboseLogging = true
 		if f, err := tea.LogToFile(getLogFilePath(), "qquestio"); err == nil {
 			defer f.Close()
 		}

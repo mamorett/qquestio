@@ -1068,7 +1068,9 @@ func GetCollectionInfo(ctx context.Context, baseURL, apiKey, collection string) 
 						selected = names[0] // fallback to first alphabetically
 					}
 					QdrantVectorName = selected
-					log.Printf("[Qdrant] Auto-selected vector name: %q from available: %v", QdrantVectorName, names)
+					if VerboseLogging {
+						log.Printf("[Qdrant] Auto-selected vector name: %q from available: %v", QdrantVectorName, names)
+					}
 				}
 			}
 		}
