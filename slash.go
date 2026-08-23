@@ -170,7 +170,7 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 			m.ragContext = ""
 			m.state = stateSearching
 			m.statusMsg = "Searching exact string..."
-			return m.searchQdrantCmd(nil)
+			return m.searchQdrantCmd(nil)()
 		case "/search":
 			if len(args) == 0 {
 				return slashResultMsg{feedback: fmt.Sprintf("Search mode → %s", m.searchMode)}

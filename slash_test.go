@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestHandleSlashCmd_Collection(t *testing.T) {
@@ -489,4 +491,51 @@ func TestHandleSlashCmd_Conf(t *testing.T) {
 		t.Fatalf("expected appErrMsg, got %T", msgErr)
 	}
 }
+
+func TestHandleSlashCmd_Exact(t *testing.T) {
+	cfg := Config{DefaultCollection: "default", QdrantURL: "http://127.0.0.1:1"}
+	m := NewModel(context.Background(), cfg)
+
+	// 1. /exact with no arguments -> should return appErrMsg
+	cmdNoArgs := m.handleSlashCmd("/exact")
+	msgNoArgs := cmdNoArgs()
+	_, ok := msgNoArgs.(appErrMsg)
+	if !ok {
+		t.Fatalf("expected appErrMsg for /exact without arguments, got %T", msgNoArgs)
+	}
+
+	// 2. /exact with arguments -> should mutate fields and return searchResultMsg or appErrMsg (not tea.Cmd)
+	cmdExact := m.handleSlashCmd("/exact needle in haystack")
+	if cmdExact == nil {
+		t.Fatal("expected non-nil tea.Cmd")
+	}
+
+	msg := cmdExact()
+	// msg must NOT be a tea.Cmd / func() tea.Msg
+	if _, isCmd := msg.(tea.Cmd); isCmd {
+		t.Fatalf("expected resolved tea.Msg, got tea.Cmd (%T)", msg)
+	}
+
+	// Should be either searchResultMsg (if server responded) or appErrMsg (if unreachable)
+	switch msg.(type) {
+	case searchResultMsg, appErrMsg:
+		// expected
+	default:
+		t.Fatalf("expected searchResultMsg or appErrMsg, got %T", msg)
+	}
+
+	if len(m.exactPhrases) != 1 || m.exactPhrases[0] != "needle in haystack" {
+		t.Errorf("expected exactPhrases to be ['needle in haystack'], got %v", m.exactPhrases)
+	}
+	if m.exactPhrase != "needle in haystack" {
+		t.Errorf("expected exactPhrase to be 'needle in haystack', got %q", m.exactPhrase)
+	}
+	if !m.forceExactPhrase {
+		t.Errorf("expected forceExactPhrase to be true")
+	}
+	if m.lastQuery != "needle in haystack" {
+		t.Errorf("expected lastQuery to be 'needle in haystack', got %q", m.lastQuery)
+	}
+}
+
 

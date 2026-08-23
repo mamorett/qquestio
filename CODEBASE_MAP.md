@@ -460,7 +460,7 @@ All cases are inline in `handleSlashCmd` (`slash.go:32`) unless a delegate is na
 | `/limit <1-100>` | inline `slash.go:95` | Exactly 1 arg, integer 1–100. Sets `m.searchLimit`. |
 | `/mode <strict\|hybrid>` | inline `slash.go:114` | Exactly 1 arg, lowercased; anything else errors. Sets `m.ragMode` (selects the default system prompt in `buildPromptMessages`). |
 | `/rewrite [llm\|heuristic\|off]` | inline `slash.go:132` | No args = show current. Sets `m.cfg.QueryRewrite`. Not listed in `/help`. |
-| `/exact <phrase...>` | inline `slash.go:154` | Joins args; sets `m.exactPhrases`, `m.exactPhrase`, `m.forceExactPhrase=true`, `m.lastQuery=phrase`, clears `output`/`lastPoints`/`ragContext`, `m.state=stateSearching`. **⚠ KNOWN BUG — returns `m.searchQdrantCmd(nil)` (a `tea.Cmd`) as the `tea.Msg`** (`slash.go:173`). Bubbletea v1.3.10 only executes the Cmd *returned from* `Update`; a Cmd delivered *as* a Msg matches no case in `Update`'s type switch (model.go:419-896) and is silently dropped. The FSM gets stuck in `stateSearching` (double-Esc still recovers). The equivalent path via plain Enter with a fully-quoted query works correctly because `model.go:631` appends the Cmd to the returned batch. Fix: wrap like `/copy all` does — invoke the cmd and return its Msg: `return m.searchQdrantCmd(nil)()` — or return a signal Msg handled in Update. |
+| `/exact <phrase...>` | inline `slash.go:154` | Joins args; sets `m.exactPhrases`, `m.exactPhrase`, `m.forceExactPhrase=true`, `m.lastQuery=phrase`, clears `output`/`lastPoints`/`ragContext`, `m.state=stateSearching`. Invokes search and returns its Msg: `return m.searchQdrantCmd(nil)()`. |
 | `/search [auto\|exact\|local]` | inline `slash.go:174` | No args = show current. Sets `m.searchMode`. Extra args beyond the first are silently ignored. |
 | `/filter [clear]`, `/filter [key] <val...>` | inline `slash.go:197` | 0 args or `clear` → empties `m.filterKey`/`m.filterValue`. 1 arg → `key="*"`, `val=args[0]`. ≥2 args → key + space-joined value. Strips one matching pair of surrounding `"` or `'` from val. |
 | `/cap` (no args) | inline `slash.go:225` | Shows current cap (`none` when 0) and mode. |
@@ -492,7 +492,7 @@ All cases are inline in `handleSlashCmd` (`slash.go:32`) unless a delegate is na
 ### Extension recipe — add a new slash command
 
 1. Add a `case "/yourcommand":` to the switch in `handleSlashCmd` (`slash.go:32`). Parse `args` (already `strings.Fields`-tokenized), validate, mutate `m.*` fields, and return `slashResultMsg{feedback: ...}` (or `systemLogMsg` for verbose output, `appErrMsg{stage: "slash"}` for errors).
-2. To chain a pipeline command, **invoke** the cmd and return its Msg (the `/copy all` pattern, `slash.go:393`): `return m.someCmd(args)()` — never return the `tea.Cmd` itself (see the `/exact` bug above).
+2. To chain a pipeline command, **invoke** the cmd and return its Msg (the `/copy all` and `/exact` pattern, `slash.go:393`, `slash.go:173`): `return m.someCmd(args)()` — never return the `tea.Cmd` itself.
 3. Add the command to the `helpText` string (`slash.go:532`) — several commands are currently missing from it.
 4. Add tests in `slash_test.go` following the existing pattern: call `cmd := m.handleSlashCmd("/yourcommand ...")`, execute `msg := cmd()`, assert on the returned Msg **and** on the mutated model fields.
 
@@ -540,7 +540,7 @@ This file declares no types, consts, or globals of its own. It **produces** pipe
 - **Signature:** `func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd`
 - **Purpose:** Pipeline Stage 2 — similarity search in Qdrant, choosing one of four paths from `m.searchCap`/`m.searchMode`/phrase state. (The doc comment documenting these paths at `commands.go:113-115` is orphaned — it sits above `computeSearchDocs`, not `searchQdrantCmd`.)
 - **Implementation:** Computes `docs = m.searchLimit`, `expand = m.searchExpand`, `searchDocs = m.computeSearchDocs(docs, expand)`, then: (1) **Exact-phrase path** — if `len(m.exactPhrases) > 0`: `rag.SearchQdrantExactPhrases(ctx, …, m.exactPhrases, searchDocs, m.filterKey, m.filterValue)` → `searchResultMsg` with `expand: 0` and empty `ExpansionMap` (works with a nil vector, which is how the `/exact` and fully-quoted-query flows call it). (2) **Capped HNSW path** — if `m.searchCap > 0 && m.exactPhrase == ""`: `candidateLimit = max(searchCap, searchDocs)`; `exact := (m.searchMode == "exact")`; `rag.SearchQdrant(ctx, …, vector, candidateLimit, searchDocs, filter, exact)`; expansion bypassed, `expand: 0`. (3) **Local path** — if `m.searchMode == "local" || m.exactPhrase != ""`: `rag.SearchQdrantFullCorpus(ctx, …, searchDocs, filter, m.qdrantPoints, m.cacheForceRefresh, nil, m.exactPhrase)`; on success mutates the Model from the closure: `m.cacheForceRefresh = false`, and if served from cache reloads `rag.LoadCorpusCache` to refresh `m.cacheInfo` and `m.cacheFilterAtWarmup`. (4) **Default no-cap path** — `exact := m.searchMode == "exact" || m.searchMode == "auto"` (auto = exact brute-force when uncapped); `rag.SearchWithContextExpansionDetailed(ctx, …, searchDocs, expand, filter, exact)` returning `res.Context / res.ExpandedPoints / res.PrimaryPoints / res.ExpansionMap`; if quoted phrases exist but exact search was not forced, boosts primaries via `rag.BoostPhraseMatches`. All errors → `appErrMsg{stage: "search"}` with path-specific reasons.
-- **Calls / Called by:** Called from `model.go:631` (exact-phrase Enter flow), `model.go:652` (after `embeddingMsg`), and `slash.go:173` (`/exact` — which returns the cmd as a Msg, so bubbletea never executes it and the FSM stays stuck in `stateSearching`; see slash.go section).
+- **Calls / Called by:** Called from `model.go:631` (exact-phrase Enter flow), `model.go:652` (after `embeddingMsg`), and `slash.go:173` (`/exact` invoked via `return m.searchQdrantCmd(nil)()`).
 
 #### `fetchQdrantInfoCmd` — `commands.go:306`
 - **Signature:** `func (m *Model) fetchQdrantInfoCmd() tea.Cmd`
@@ -1457,7 +1457,7 @@ Consolidated index of the per-section recipes above. Each links to the detailed 
 
 | I want to… | Steps (details in section) |
 |---|---|
-| **Add a new slash command** | Add a `case` in `handleSlashCmd` (`slash.go:32`); mutate `m.*`, return `slashResultMsg`/`systemLogMsg`/`appErrMsg{stage:"slash"}`. Chain pipeline cmds by invoking them (`return m.xCmd()()`), never returning the Cmd itself (see the `/exact` bug). Add to `helpText`. Test in `slash_test.go`. → [slash.go section](#root-package--slashgo-runtime-slash-commands) |
+| **Add a new slash command** | Add a `case` in `handleSlashCmd` (`slash.go:32`); mutate `m.*`, return `slashResultMsg`/`systemLogMsg`/`appErrMsg{stage:"slash"}`. Chain pipeline cmds by invoking them (`return m.xCmd()()`), never returning the Cmd itself. Add to `helpText`. Test in `slash_test.go`. → [slash.go section](#root-package--slashgo-runtime-slash-commands) |
 | **Add a new config option** | Add the field to `Config` (`config.go:12`) with JSON tag + env var handling in `LoadConfig` phases 2-4. If it must survive `/conf` runtime switches, copy it in the `/conf` handler (`slash.go:77-93`). Test in `config_test.go`. → [config.go section](#root-package--configgo-layered-configuration) |
 | **Add a new skill (local tool)** | Implement the `Skill` interface; register in `NewSkillRegistry` (`skills.go:30`). Prompt injection, `CALL:` dispatch, and confirmation gating are automatic. Test in `skills_test.go`. → [skills.go section](#root-package--skillsgo-agentic-tool-system) |
 | **Add a new pipeline stage** | New `tea.Msg` type in `messages.go`; new `*Cmd` factory in `commands.go`; insert the `case` in `Update`'s pipeline chain (model.go:648-741); new state const + checklist rendering in `updateViewport` if visible. → [model.go extension points](#root-package--modelgo-the-tui-model--fsm) |
@@ -1474,17 +1474,16 @@ Consolidated index of the per-section recipes above. Each links to the detailed 
 
 ### Known quirks & gotchas (verified against source)
 
-1. **`/exact` is broken** (`slash.go:173`): returns a `tea.Cmd` as a `tea.Msg`; bubbletea drops it, FSM sticks in `stateSearching`. Fix pattern: `return m.searchQdrantCmd(nil)()`.
-2. **`/help` is incomplete**: omits `/rewrite`, `/exact`, `/write` alias.
-3. **`scrollOneRange` hardcodes `file_name`** (`qdrant.go:1755`) as the doc-identity key for expansion scrolls — collections using other `DocumentIDKeys` (e.g. `source`, `title`) get no adjacent-chunk expansion.
-4. **`SearchQdrant` duplicates `buildFilter` inline** (`qdrant.go:183-216`) — filter changes must touch both.
-5. **`ContextLimit` "0 disables compaction" comment is wrong** (`config.go:181-185`): 0 is defaulted to 131072; only a negative value disables.
-6. **`--safe` is force-on only** (`config.go:169-171`): no CLI/env way to turn confirmation off once set in JSON.
-7. **`renderHeader`'s status switch misses confirm states** (model.go:994-1013): `stateConfirmQuit`/`stateConfirmSkill` render an empty `[STATUS]`.
-8. **`chunks %d of %d` in references panel** (`model.go:1971-1973`) uses the range max (`hi`) as "total" — cosmetic mislabel, not a real count.
-9. **`condenseQueryForRetrieval` keyword matching is substring-based** (`commands.go:90-97`): `"it"` matches inside `"with"` — follow-ups are over-detected (intentional bias toward recall).
-10. **`rag.QdrantVectorName` and `rag.HTTPTimeout` are mutable package globals** set as side effects by `NewModel`, `/conf`, and `GetCollectionInfo` — tests that mutate them should reset.
-11. **`saveSession` drops `Reasoning`** — thinking text is not persisted across sessions (render caches too).
-12. **Integer env parsing ignores invalid values silently** (`config.go:139-163`) — a typo'd `SEARCH_CAP=abc` is quietly dropped.
-13. **`loadSession` restores `searchLimit` only when > 0** (`model.go:2286+`) — a session saved with limit 0 (impossible via `/limit` validation, but possible in a hand-edited file) falls back to the config default.
-14. **The skill confirm dialog only gates once per session** once "A" (allow-always) is pressed — `skillsAlwaysAllowed` is never reset, including across `/conf` profile switches.
+1. **`/help` is incomplete**: omits `/rewrite`, `/exact`, `/write` alias.
+2. **`scrollOneRange` hardcodes `file_name`** (`qdrant.go:1755`) as the doc-identity key for expansion scrolls — collections using other `DocumentIDKeys` (e.g. `source`, `title`) get no adjacent-chunk expansion.
+3. **`SearchQdrant` duplicates `buildFilter` inline** (`qdrant.go:183-216`) — filter changes must touch both.
+4. **`ContextLimit` "0 disables compaction" comment is wrong** (`config.go:181-185`): 0 is defaulted to 131072; only a negative value disables.
+5. **`--safe` is force-on only** (`config.go:169-171`): no CLI/env way to turn confirmation off once set in JSON.
+6. **`renderHeader`'s status switch misses confirm states** (model.go:994-1013): `stateConfirmQuit`/`stateConfirmSkill` render an empty `[STATUS]`.
+7. **`chunks %d of %d` in references panel** (`model.go:1971-1973`) uses the range max (`hi`) as "total" — cosmetic mislabel, not a real count.
+8. **`condenseQueryForRetrieval` keyword matching is substring-based** (`commands.go:90-97`): `"it"` matches inside `"with"` — follow-ups are over-detected (intentional bias toward recall).
+9. **`rag.QdrantVectorName` and `rag.HTTPTimeout` are mutable package globals** set as side effects by `NewModel`, `/conf`, and `GetCollectionInfo` — tests that mutate them should reset.
+10. **`saveSession` drops `Reasoning`** — thinking text is not persisted across sessions (render caches too).
+11. **Integer env parsing ignores invalid values silently** (`config.go:139-163`) — a typo'd `SEARCH_CAP=abc` is quietly dropped.
+12. **`loadSession` restores `searchLimit` only when > 0** (`model.go:2286+`) — a session saved with limit 0 (impossible via `/limit` validation, but possible in a hand-edited file) falls back to the config default.
+13. **The skill confirm dialog only gates once per session** once "A" (allow-always) is pressed — `skillsAlwaysAllowed` is never reset, including across `/conf` profile switches.
