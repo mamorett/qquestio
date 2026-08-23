@@ -87,6 +87,7 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 			m.collection = newCfg.DefaultCollection
 			m.searchCap = newCfg.SearchCap
 			m.rerankerPool = newCfg.RerankerPool
+			m.skillsAlwaysAllowed = false
 			rag.HTTPTimeout = time.Duration(newCfg.HTTPTimeoutSeconds) * time.Second
 			rag.QdrantVectorName = newCfg.QdrantVectorName
 
@@ -536,20 +537,22 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				"  /limit <1-100>      - Set the number of context documents to retrieve\n" +
 				"  /expand <N|off>     - ±N adjacent chunks from the same doc per match (0=off, 1=default)\n" +
 				"  /cap [N|off]        - Set/clear the candidate pool cap (0/no cap = full corpus)\n" +
+				"  /exact <phrase...>  - Directly search for an exact text phrase\n" +
 				"  /search <auto|exact|local> - Set vector search mode (auto = HNSW, exact = server brute force, local = cache)\n" +
 				"  /cache [status|refresh|warmup|clear|dir] - Inspect or control the on-disk corpus cache\n" +
 				"  /filter [key] <val> - Filter search (e.g. '/filter file_name guide.txt' or '/filter guide.txt')\n" +
 				"  /rerank <on|off>    - Enable/disable the reranker step\n" +
 				"  /rerankerpool <N|auto> - Set the candidate pool size for the reranker (0/auto = dynamic)\n" +
 				"  /mode <strict|hybrid>- Switch RAG mode (strict closed-book vs hybrid general-knowledge)\n" +
+				"  /rewrite [llm|heuristic|off] - Set conversation query rewrite mode\n" +
 				"  /system <prompt>    - Update the custom LLM system prompt\n" +
 				"  /compact [N]        - Compact history, keeping last N Q&A pairs (default 3); auto at 85% ctx\n" +
 				"  /clear              - Clear conversation history and references (keeps prompt history)\n" +
 				"  /copy               - Copy the last response (or references if ref panel is focused) to the clipboard\n" +
 				"  /copy ref           - Copy the last retrieved references to the clipboard\n" +
 				"  /copy all           - Copy the entire conversation transcript to the clipboard\n" +
-				"  /save <file.md>     - Write the last response directly to a markdown file\n" +
-				"  /save all <file.md> - Write the entire conversation history to a markdown file\n" +
+				"  /save <file.md>     - Write the last response directly to a markdown file (alias: /write)\n" +
+				"  /save all <file.md> - Write the entire conversation history to a markdown file (alias: /write all)\n" +
 				"  /help               - Show this help information\n" +
 				"  /quit               - Exit the application\n\n" +
 				"Keyboard Shortcuts:\n" +

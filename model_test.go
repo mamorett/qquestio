@@ -276,7 +276,7 @@ func TestSessionSaveAndLoad(t *testing.T) {
 	m.searchLimit = 42
 	m.history = []ConversationTurn{
 		{Role: "user", Content: "Hello session test"},
-		{Role: "assistant", Content: "I am tested", References: []rag.QdrantPoint{
+		{Role: "assistant", Content: "I am tested", Reasoning: "step-by-step thinking", References: []rag.QdrantPoint{
 			{ID: "point1", Score: 0.99, Payload: map[string]interface{}{"text": "sample"}},
 		}},
 	}
@@ -308,6 +308,9 @@ func TestSessionSaveAndLoad(t *testing.T) {
 	if m2.history[0].Content != "Hello session test" {
 		t.Errorf("expected turn content 'Hello session test', got %q", m2.history[0].Content)
 	}
+	if m2.history[1].Reasoning != "step-by-step thinking" {
+		t.Errorf("expected Reasoning 'step-by-step thinking', got %q", m2.history[1].Reasoning)
+	}
 	if len(m2.history[1].References) != 1 {
 		t.Errorf("expected 1 reference, got %d", len(m2.history[1].References))
 	}
@@ -316,6 +319,25 @@ func TestSessionSaveAndLoad(t *testing.T) {
 	}
 	if m2.historyIndex != 1 {
 		t.Errorf("expected historyIndex to be 1, got %d", m2.historyIndex)
+	}
+}
+
+func TestRenderHeader_ConfirmStates(t *testing.T) {
+	cfg := Config{DefaultCollection: "default"}
+	m := NewModel(context.Background(), cfg)
+
+	m.state = stateConfirmQuit
+	m.statusMsg = "Press Y to exit"
+	hdrQuit := m.renderHeader()
+	if !strings.Contains(hdrQuit, "[CONFIRM QUIT]") {
+		t.Errorf("expected [CONFIRM QUIT] in header, got:\n%s", hdrQuit)
+	}
+
+	m.state = stateConfirmSkill
+	m.statusMsg = "Run skill?"
+	hdrSkill := m.renderHeader()
+	if !strings.Contains(hdrSkill, "[CONFIRM SKILL]") {
+		t.Errorf("expected [CONFIRM SKILL] in header, got:\n%s", hdrSkill)
 	}
 }
 

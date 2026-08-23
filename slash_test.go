@@ -463,6 +463,7 @@ func TestHandleSlashCmd_Conf(t *testing.T) {
 	}
 
 	// 2. Switch configuration to "prod"
+	m.skillsAlwaysAllowed = true
 	cmdSwitch := m.handleSlashCmd("/conf prod")
 	msgSwitch := cmdSwitch()
 	resSwitch, ok := msgSwitch.(slashResultMsg)
@@ -481,6 +482,9 @@ func TestHandleSlashCmd_Conf(t *testing.T) {
 	}
 	if m.cfg.OpenAIModel != "gpt-4" {
 		t.Errorf("expected OpenAIModel to be updated to gpt-4, got %s", m.cfg.OpenAIModel)
+	}
+	if m.skillsAlwaysAllowed {
+		t.Errorf("expected skillsAlwaysAllowed to be reset to false on /conf switch")
 	}
 
 	// 3. Switch to non-existent configuration -> should error
@@ -535,6 +539,28 @@ func TestHandleSlashCmd_Exact(t *testing.T) {
 	}
 	if m.lastQuery != "needle in haystack" {
 		t.Errorf("expected lastQuery to be 'needle in haystack', got %q", m.lastQuery)
+	}
+}
+
+func TestHandleSlashCmd_Help(t *testing.T) {
+	cfg := Config{DefaultCollection: "default"}
+	m := NewModel(context.Background(), cfg)
+
+	cmd := m.handleSlashCmd("/help")
+	msg := cmd()
+	logMsg, ok := msg.(systemLogMsg)
+	if !ok {
+		t.Fatalf("expected systemLogMsg for /help, got %T", msg)
+	}
+
+	if !strings.Contains(logMsg.content, "/exact") {
+		t.Errorf("expected /help to include /exact")
+	}
+	if !strings.Contains(logMsg.content, "/rewrite") {
+		t.Errorf("expected /help to include /rewrite")
+	}
+	if !strings.Contains(logMsg.content, "/write") {
+		t.Errorf("expected /help to include /write alias")
 	}
 }
 

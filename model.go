@@ -1010,6 +1010,12 @@ func (m *Model) renderHeader() string {
 	case stateError:
 		statusText = "ERROR"
 		statusStyle = styles.HeaderStatus.Foreground(nord11)
+	case stateConfirmQuit:
+		statusText = "CONFIRM QUIT"
+		statusStyle = styles.HeaderStatus.Foreground(nord12)
+	case stateConfirmSkill:
+		statusText = "CONFIRM SKILL"
+		statusStyle = styles.HeaderStatus.Foreground(nord12)
 	}
 
 	var indicator string
@@ -1968,9 +1974,9 @@ func formatReferences(points []rag.QdrantPoint, width int) string {
 		chunkRangeStr := ""
 		if lo >= 0 && hi >= 0 {
 			if lo == hi {
-				chunkRangeStr = fmt.Sprintf("chunks %d of %d", lo, hi)
+				chunkRangeStr = fmt.Sprintf("chunk %d", lo)
 			} else {
-				chunkRangeStr = fmt.Sprintf("chunks %d-%d of %d", lo, hi, hi)
+				chunkRangeStr = fmt.Sprintf("chunks %d-%d", lo, hi)
 			}
 		} else {
 			chunkRangeStr = fmt.Sprintf("%d chunks", len(pts))
@@ -2252,9 +2258,11 @@ func (m *Model) saveSession() error {
 	historyCopy := make([]ConversationTurn, len(m.history))
 	for i, turn := range m.history {
 		historyCopy[i] = ConversationTurn{
-			Role:       turn.Role,
-			Content:    turn.Content,
-			References: turn.References,
+			Role:            turn.Role,
+			Content:         turn.Content,
+			Reasoning:       turn.Reasoning,
+			References:      turn.References,
+			RenderedContent: turn.RenderedContent,
 		}
 	}
 
@@ -2304,8 +2312,10 @@ func (m *Model) loadSession(sessionID string) error {
 	if sess.Collection != "" {
 		m.collection = sess.Collection
 	}
-	if sess.SearchLimit > 0 {
+	if sess.SearchLimit > 0 && sess.SearchLimit <= 100 {
 		m.searchLimit = sess.SearchLimit
+	} else if sess.SearchLimit > 100 {
+		m.searchLimit = 100
 	}
 	m.searchCap = sess.SearchCap
 	m.rerankerPool = sess.RerankerPool

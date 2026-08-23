@@ -182,37 +182,7 @@ func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vecto
 
 	var filter *QdrantFilter
 	if filterKey != "" && filterValue != "" {
-		isDocKey := false
-		for _, dk := range DocumentIDKeys {
-			if strings.ToLower(filterKey) == strings.ToLower(dk) {
-				isDocKey = true
-				break
-			}
-		}
-
-		if isDocKey || filterKey == "*" || filterKey == "any_file" {
-			var shouldConds []QdrantFieldCondition
-			for _, dk := range DocumentIDKeys {
-				shouldConds = append(shouldConds, QdrantFieldCondition{
-					Key:   dk,
-					Match: &QdrantMatch{Value: filterValue},
-				})
-			}
-			filter = &QdrantFilter{
-				Should: shouldConds,
-			}
-		} else {
-			filter = &QdrantFilter{
-				Must: []QdrantFieldCondition{
-					{
-						Key: filterKey,
-						Match: &QdrantMatch{
-							Value: filterValue,
-						},
-					},
-				},
-			}
-		}
+		filter = buildFilter(filterKey, filterValue)
 	}
 
 	reqBody := QdrantQueryRequest{
@@ -1096,9 +1066,11 @@ var chunkIndexKeys = []string{"chunk_index", "chunkIndex", "position", "seq", "i
 // docRange represents the inclusive chunk_index range [lo, hi] to expand
 // for a single document after the primary exact search.
 type docRange struct {
-	docID string
-	lo    int
-	hi    int
+	docID    string
+	docKey   string
+	chunkKey string
+	lo       int
+	hi       int
 }
 
 // ExpansionMap is docID → chunk_index → QdrantPoint. It captures every chunk
@@ -1121,19 +1093,25 @@ type ContextExpansionResult struct {
 	ExpansionMap   ExpansionMap  // docID → chunk_index → point, covers all chunks fetched
 }
 
-// extractDocID returns the document identifier for a point, or "" if none.
-func extractDocID(p QdrantPoint) string {
+// extractDocIDAndKey returns the document identifier and the payload key that matched, or ("", "") if none.
+func extractDocIDAndKey(p QdrantPoint) (string, string) {
 	if p.Payload == nil {
-		return ""
+		return "", ""
 	}
 	for _, k := range DocumentIDKeys {
 		if v, ok := p.Payload[k]; ok {
 			if s, ok := v.(string); ok && s != "" {
-				return s
+				return s, k
 			}
 		}
 	}
-	return ""
+	return "", ""
+}
+
+// extractDocID returns the document identifier for a point, or "" if none.
+func extractDocID(p QdrantPoint) string {
+	docID, _ := extractDocIDAndKey(p)
+	return docID
 }
 
 // IsFullyQuoted checks if the entire trimmed string is a single quoted phrase.
@@ -1199,11 +1177,11 @@ func BoostPhraseMatches(points []QdrantPoint, phrases []string) []QdrantPoint {
 	return append(matching, nonMatching...)
 }
 
-// extractChunkIndex returns the chunk's positional index within its document,
-// or -1 if not present / not parseable.
-func extractChunkIndex(p QdrantPoint) int {
+// extractChunkIndexAndKey returns the chunk's positional index and the matching payload key,
+// or (-1, "") if not present / not parseable.
+func extractChunkIndexAndKey(p QdrantPoint) (int, string) {
 	if p.Payload == nil {
-		return -1
+		return -1, ""
 	}
 	for _, k := range chunkIndexKeys {
 		v, ok := p.Payload[k]
@@ -1212,20 +1190,27 @@ func extractChunkIndex(p QdrantPoint) int {
 		}
 		switch n := v.(type) {
 		case float64:
-			return int(n)
+			return int(n), k
 		case int:
-			return n
+			return n, k
 		case int64:
-			return int(n)
+			return int(n), k
 		case string:
 			// Try to parse as int.
 			var i int
 			if _, err := fmt.Sscanf(n, "%d", &i); err == nil {
-				return i
+				return i, k
 			}
 		}
 	}
-	return -1
+	return -1, ""
+}
+
+// extractChunkIndex returns the chunk's positional index within its document,
+// or -1 if not present / not parseable.
+func extractChunkIndex(p QdrantPoint) int {
+	idx, _ := extractChunkIndexAndKey(p)
+	return idx
 }
 
 // SearchWithContextExpansionDetailed is the rich version of SearchWithContextExpansion
@@ -1286,17 +1271,17 @@ func SearchWithContextExpansionDetailed(
 	// Phase 2: group by document, compute expansion ranges.
 	docMap := make(map[string]*docRange)
 	for _, pt := range primaryPoints {
-		docID := extractDocID(pt)
+		docID, docKey := extractDocIDAndKey(pt)
 		if docID == "" {
 			continue
 		}
-		idx := extractChunkIndex(pt)
+		idx, chunkKey := extractChunkIndexAndKey(pt)
 		if idx < 0 {
 			continue
 		}
 		r, ok := docMap[docID]
 		if !ok {
-			docMap[docID] = &docRange{docID: docID, lo: idx - expand, hi: idx + expand}
+			docMap[docID] = &docRange{docID: docID, docKey: docKey, chunkKey: chunkKey, lo: idx - expand, hi: idx + expand}
 			continue
 		}
 		if idx-expand < r.lo {
@@ -1745,6 +1730,14 @@ func scrollOneRange(ctx context.Context, url, apiKey string, r docRange) []Qdran
 		default:
 		}
 
+		docKey := r.docKey
+		if docKey == "" {
+			docKey = "file_name"
+		}
+		chunkKey := r.chunkKey
+		if chunkKey == "" {
+			chunkKey = "chunk_index"
+		}
 		loF := float64(r.lo)
 		hiF := float64(r.hi)
 		reqBody := ScrollRequest{
@@ -1754,9 +1747,9 @@ func scrollOneRange(ctx context.Context, url, apiKey string, r docRange) []Qdran
 			Offset:      offset,
 			Filter: &QdrantFilter{
 				Must: []QdrantFieldCondition{
-					{Key: "file_name", Match: &QdrantMatch{Value: r.docID}},
+					{Key: docKey, Match: &QdrantMatch{Value: r.docID}},
 					{
-						Key:   "chunk_index",
+						Key:   chunkKey,
 						Range: &QdrantRange{Gte: &loF, Lte: &hiF},
 					},
 				},
