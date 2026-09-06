@@ -87,12 +87,25 @@ func (m *Model) condenseQueryForRetrieval(ctx context.Context, raw string) strin
 		isFollowUp = true
 	} else {
 		lower := strings.ToLower(raw)
-		followUpKeywords := []string{"it", "its", "this", "that", "these", "those", "he", "she", "they", "them",
-			"his", "her", "their", "above", "earlier", "previous", "more", "also", "and what", "what about"}
-		for _, kw := range followUpKeywords {
-			if strings.Contains(lower, kw) {
+		singleWords := map[string]bool{
+			"it": true, "its": true, "this": true, "that": true, "these": true, "those": true,
+			"he": true, "she": true, "they": true, "them": true, "his": true, "her": true,
+			"their": true, "above": true, "earlier": true, "previous": true, "more": true, "also": true,
+		}
+		for _, f := range strings.Fields(lower) {
+			cleaned := strings.Trim(f, ".,!?:;\"'()[]{}")
+			if singleWords[cleaned] {
 				isFollowUp = true
 				break
+			}
+		}
+		if !isFollowUp {
+			multiWordPhrases := []string{"and what", "what about"}
+			for _, phrase := range multiWordPhrases {
+				if strings.Contains(lower, phrase) {
+					isFollowUp = true
+					break
+				}
 			}
 		}
 	}

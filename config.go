@@ -50,9 +50,19 @@ func getConfigPath() string {
 	return "config.json"
 }
 
+func defaultConfig() Config {
+	return Config{
+		HTTPTimeoutSeconds: 60,
+		ContextLimit:       131072,
+		QueryRewrite:       "llm",
+	}
+}
+
 // loadJSONConfigFile reads configuration from a config.json file if it exists.
 func loadJSONConfigFile() (configFile, bool) {
-	var file configFile
+	file := configFile{
+		Config: defaultConfig(),
+	}
 	configPath := getConfigPath()
 	f, err := os.Open(configPath)
 	if err != nil {
@@ -74,8 +84,8 @@ func loadJSONConfigFile() (configFile, bool) {
 }
 
 func LoadConfig(configName ...string) (Config, error) {
-	// 1. Start with values from config.json (if present)
-	var cfg Config
+	// 1. Start with default values (overridden by config.json if present)
+	cfg := defaultConfig()
 	var activeName string
 
 	file, ok := loadJSONConfigFile()
@@ -136,37 +146,35 @@ func LoadConfig(configName ...string) (Config, error) {
 	overrideFromEnv(&cfg.RerankerURL, "RERANKER_URL")
 	overrideFromEnv(&cfg.RerankerAPIKey, "RERANKER_API_KEY")
 	overrideFromEnv(&cfg.RerankerModel, "RERANKER_MODEL")
-	if val := os.Getenv("SEARCH_CAP"); val != "" {
-		if n, err := strconv.Atoi(val); err == nil && n >= 0 {
-			cfg.SearchCap = n
+
+	overrideIntFromEnv := func(target *int, envKey string) {
+		if val := os.Getenv(envKey); val != "" {
+			n, err := strconv.Atoi(val)
+			if err != nil || n < 0 {
+				fmt.Fprintf(os.Stderr, "Warning: invalid integer value %q for %s, ignoring\n", val, envKey)
+				return
+			}
+			*target = n
 		}
 	}
-	if val := os.Getenv("RERANKER_POOL"); val != "" {
-		if n, err := strconv.Atoi(val); err == nil && n >= 0 {
-			cfg.RerankerPool = n
-		}
-	}
-	if val := os.Getenv("CONTEXT_LIMIT"); val != "" {
-		if n, err := strconv.Atoi(val); err == nil && n >= 0 {
-			cfg.ContextLimit = n
-		}
-	}
-	if val := os.Getenv("QQUESTIO_HTTP_TIMEOUT"); val != "" {
-		if n, err := strconv.Atoi(val); err == nil && n >= 0 {
-			cfg.HTTPTimeoutSeconds = n
-		}
-	}
-	if val := os.Getenv("OPENAI_MAX_TOKENS"); val != "" {
-		if n, err := strconv.Atoi(val); err == nil && n >= 0 {
-			cfg.OpenAIMaxTokens = n
-		}
-	}
+	overrideIntFromEnv(&cfg.SearchCap, "SEARCH_CAP")
+	overrideIntFromEnv(&cfg.RerankerPool, "RERANKER_POOL")
+	overrideIntFromEnv(&cfg.ContextLimit, "CONTEXT_LIMIT")
+	overrideIntFromEnv(&cfg.HTTPTimeoutSeconds, "QQUESTIO_HTTP_TIMEOUT")
+	overrideIntFromEnv(&cfg.OpenAIMaxTokens, "OPENAI_MAX_TOKENS")
 
 	// Apply CLI overrides if explicitly set (highest precedence)
 	if cliSearchCap >= 0 {
 		cfg.SearchCap = cliSearchCap
 	}
-	if cliSafe || os.Getenv("QQUESTIO_SKILLS_REQUIRE_CONFIRM") == "1" {
+	if envVal := os.Getenv("QQUESTIO_SKILLS_REQUIRE_CONFIRM"); envVal != "" {
+		if envVal == "1" || strings.EqualFold(envVal, "true") {
+			cfg.SkillsRequireConfirm = true
+		} else if envVal == "0" || strings.EqualFold(envVal, "false") {
+			cfg.SkillsRequireConfirm = false
+		}
+	}
+	if cliSafe {
 		cfg.SkillsRequireConfirm = true
 	}
 	if val := os.Getenv("QUERY_REWRITE"); val != "" {
@@ -177,19 +185,6 @@ func LoadConfig(configName ...string) (Config, error) {
 	if cfg.HTTPTimeoutSeconds <= 0 {
 		cfg.HTTPTimeoutSeconds = 60
 	}
-
-	// Default ContextLimit to 131072 (128k) when not explicitly set.
-	// Set to 0 to disable auto-compaction entirely.
-	if cfg.ContextLimit == 0 {
-		cfg.ContextLimit = 131072
-	}
-
-	// Default OpenAIMaxTokens to 0 (no limit) when not explicitly set.
-	if cfg.OpenAIMaxTokens == 0 {
-		cfg.OpenAIMaxTokens = 0
-	}
-
-	// Default QueryRewrite to "llm" when not explicitly set
 	if cfg.QueryRewrite == "" {
 		cfg.QueryRewrite = "llm"
 	}

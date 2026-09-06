@@ -293,13 +293,14 @@ func stringReadCloser(s string) *stringRC { return &stringRC{s: s} }
 
 // applyServerFilter is a simplified server-side filter for the fake Qdrant.
 // It supports the two filter shapes that SearchWithContextExpansion actually
-// emits: file_name match AND chunk_index range.
+// emits: doc match AND chunk range.
 func applyServerFilter(points []QdrantPoint, f *QdrantFilter) []QdrantPoint {
 	if f == nil {
 		return points
 	}
 	docKey := ""
 	docVal := ""
+	chunkKey := "chunk_index"
 	lo, hi := -1<<31, 1<<31-1
 	for _, c := range f.Must {
 		if c.Match != nil && c.Match.Value != nil {
@@ -309,6 +310,7 @@ func applyServerFilter(points []QdrantPoint, f *QdrantFilter) []QdrantPoint {
 			}
 		}
 		if c.Range != nil {
+			chunkKey = c.Key
 			if c.Range.Gte != nil {
 				lo = int(*c.Range.Gte)
 			}
@@ -327,13 +329,19 @@ func applyServerFilter(points []QdrantPoint, f *QdrantFilter) []QdrantPoint {
 			}
 		}
 		if lo != -1<<31 || hi != 1<<31-1 {
-			idx, ok := p.Payload["chunk_index"].(float64)
-			if !ok {
-				if i, ok2 := p.Payload["chunk_index"].(int); ok2 {
-					idx = float64(i)
-				} else {
-					continue
+			var idx float64
+			var hasIdx bool
+			if v, ok := p.Payload[chunkKey]; ok {
+				if fv, okF := v.(float64); okF {
+					idx = fv
+					hasIdx = true
+				} else if iv, okI := v.(int); okI {
+					idx = float64(iv)
+					hasIdx = true
 				}
+			}
+			if !hasIdx {
+				continue
 			}
 			if int(idx) < lo || int(idx) > hi {
 				continue
@@ -654,3 +662,48 @@ func mapKeys(m ExpansionMap) []string {
 	}
 	return keys
 }
+
+func TestSearchWithContextExpansion_CustomDocIDKey(t *testing.T) {
+	// Create corpus using "source" and "position" instead of "file_name" and "chunk_index"
+	corpus := []QdrantPoint{
+		{
+			ID:     "p1",
+			Vector: []float32{1, 0, 0, 0},
+			Score:  0.95,
+			Payload: map[string]interface{}{
+				"source":   "custom_guide.md",
+				"position": 1,
+				"text":     "First chunk of custom guide",
+			},
+		},
+		{
+			ID:     "p2",
+			Vector: []float32{0.5, 0, 0, 0},
+			Score:  0.5,
+			Payload: map[string]interface{}{
+				"source":   "custom_guide.md",
+				"position": 2,
+				"text":     "Second adjacent chunk",
+			},
+		},
+	}
+
+	fake := newFakeQdrant(corpus)
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+
+	ctx := context.Background()
+	query := []float32{1, 0, 0, 0}
+	res, err := SearchWithContextExpansionDetailed(ctx, srv.URL, "secret", "col", query, 1, 1, "", "", true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(res.ExpandedPoints) < 2 {
+		t.Fatalf("expected at least 2 expanded points using 'source' doc key, got %d", len(res.ExpandedPoints))
+	}
+	if !strings.Contains(res.Context, "Second adjacent chunk") {
+		t.Errorf("expected expanded context to contain adjacent chunk text, got:\n%s", res.Context)
+	}
+}
+

@@ -292,10 +292,10 @@ The fully-resolved runtime configuration, produced by `LoadConfig`. Passed by va
 
 Quirks worth knowing:
 
-- `SkillsRequireConfirm` is **force-true only** from env/CLI (`config.go:169-171`): `--safe` or `QQUESTIO_SKILLS_REQUIRE_CONFIRM=1` turn it on, but nothing can turn off a `true` set in JSON.
-- `ContextLimit`: the struct comment says "Set to 0 to disable auto-compaction", but defaulting at `config.go:183-185` replaces `0` with `131072`. Since env parsing rejects negatives (`n >= 0`), the only way to actually disable compaction is a negative JSON value — `model.go:268` treats `ContextLimit <= 0` as a no-op.
-- Integer env parsing (`config.go:139-163`) silently ignores non-numeric and negative values.
-- `OpenAIMaxTokens` "default" block (`config.go:188-190`) is a literal no-op (`if == 0 { = 0 }`) — kept as a placeholder.
+- `SkillsRequireConfirm` (`config.go:169-173`): `--safe` or `QQUESTIO_SKILLS_REQUIRE_CONFIRM=1` (or `true`) turns it on; `QQUESTIO_SKILLS_REQUIRE_CONFIRM=0` (or `false`) turns it off.
+- `ContextLimit` (`config.go:50-53,150-155`): defaults to 131072 (128k) when omitted; set to 0 (in JSON or `CONTEXT_LIMIT=0`) to disable auto-compaction entirely.
+- Integer env parsing (`config.go:139-158`): validates numeric format and logs a warning on invalid or negative values to stderr.
+- `OpenAIMaxTokens` default: `0` (unlimited max completion tokens).
 - The env override for `QUERY_REWRITE` sits inside the "CLI overrides" block (`config.go:172-174`), not with the other string env vars.
 
 #### `configFile` — `config.go:39`
@@ -486,7 +486,7 @@ All cases are inline in `handleSlashCmd` (`slash.go:32`) unless a delegate is na
 | `/compact [N]` | inline `slash.go:492` | `keepPairs` default 3; only parsed if exactly 1 arg and `n>=1` (invalid values silently fall back to 3). Calls `m.compactHistory(keepPairs)` (`model.go:224`), appends a system turn recording entries removed, `m.updateViewport()`. |
 | `/clear` | inline `slash.go:517` | Nils `history`/`lastPoints`/`ragContext`/`output`, appends `[ Conversation and references cleared ]` system turn, `updateViewport()`. |
 | `/quit` | inline `slash.go:529` | Returns `quitMsg{}`. |
-| `/help` | inline `slash.go:532` | Static `helpText` string returned as `systemLogMsg`. **Omits `/rewrite`, `/exact`, and the `/write` alias.** |
+| `/help` | inline `slash.go:532` | Static `helpText` string returned as `systemLogMsg` listing all slash commands and shortcuts. |
 | anything else | inline `slash.go:567` | `appErrMsg` "unknown command", stage `"slash"`. |
 
 ### Extension recipe — add a new slash command
@@ -778,7 +778,7 @@ Non-FSM messages handled: `qdrantInfoMsg`, `llmInfoMsg`, `embedderInfoMsg`, `sla
 #### `renderHeader` — `model.go:988`
 - **Signature:** `func (m *Model) renderHeader() string`
 - **Purpose:** 4-5 line header (status, DB stats, endpoints, reranker, cache warning).
-- **Implementation:** Line 1: `[STATUS] statusMsg` colored per state + spinner + `(ragMode)` + collection tag. Quirk: the state switch (model.go:994-1013) has no cases for `stateConfirmQuit`/`stateConfirmSkill`, so statusText renders empty there. Line 2: Qdrant URL/status, collection, Limit, Expand (`off`/`±N`), Cap (`none`/int), Search mode, Cache, RAG mode, Ctx usage % (green <70 / yellow 70-84 / red >=85), Tokens (`~` prefix when estimated). Line 3: Embed + LLM models/URLs with (checking.../✓/✗) status. Line 4 (only when `cfg.RerankerURL != ""`): reranker model/URL, `enabled`/`bypassed`. Optional warning line when `cacheInfo != ""` and current filter != `cacheFilterAtWarmup`. Ends with a `─` border.
+- **Implementation:** Line 1: `[STATUS] statusMsg` colored per state (including `[CONFIRM QUIT]` and `[CONFIRM SKILL]`) + spinner + `(ragMode)` + collection tag. Line 2: Qdrant URL/status, collection, Limit, Expand (`off`/`±N`), Cap (`none`/int), Search mode, Cache, RAG mode, Ctx usage % (green <70 / yellow 70-84 / red >=85), Tokens (`~` prefix when estimated). Line 3: Embed + LLM models/URLs with (checking.../✓/✗) status. Line 4 (only when `cfg.RerankerURL != ""`): reranker model/URL, `enabled`/`bypassed`. Optional warning line when `cacheInfo != ""` and current filter != `cacheFilterAtWarmup`. Ends with a `─` border.
 - **Calls / Called by:** `View`.
 
 #### `renderFooter` — `model.go:1252`
@@ -846,7 +846,7 @@ Non-FSM messages handled: `qdrantInfoMsg`, `llmInfoMsg`, `embedderInfoMsg`, `sla
 #### `formatReferences` — `model.go:1815`
 - **Signature:** `func formatReferences(points []rag.QdrantPoint, width int) string`
 - **Purpose:** Render retrieved points as document-grouped reference blocks for the right panel (and clipboard/file exports).
-- **Implementation:** Groups points by `extractDocumentName(pt.Payload)` (same helper the prompt builder uses, so panel and prompt agree on titles); points without a doc name go to one fallback group rendered per-point. Within a group, sorts by chunk index read from payload keys `chunk_index|chunkIndex|position|seq|index|ord`. Header line `Document: <name>` + `Score: X · chunks lo-hi` (score = max `IsPrimary` point score, else first point's); per-chunk bullets `• chunk (chunk N, score S, db cosine O)` including `OriginalScore` when non-zero; text preview wrapped at `width-8`. Quirk: `chunks %d of %d` uses `hi` as the "total" (model.go:1971-1973), i.e. the range max, not a real total count. Dotted separators between groups.
+- **Implementation:** Groups points by `extractDocumentName(pt.Payload)` (same helper the prompt builder uses, so panel and prompt agree on titles); points without a doc name go to one fallback group rendered per-point. Within a group, sorts by chunk index read from payload keys `chunk_index|chunkIndex|position|seq|index|ord`. Header line `Document: <name>` + `Score: X · chunks lo-hi` (score = max `IsPrimary` point score, else first point's); per-chunk bullets `• chunk (chunk N, score S, db cosine O)` including `OriginalScore` when non-zero; text preview wrapped at `width-8`. Chunk ranges are formatted as `chunk N` (single chunk) or `chunks lo-hi` (range). Dotted separators between groups.
 - **Calls / Called by:** `updateRefViewport`, `getRenderedReferences`, `copyLastResponseCmd`, `copyAllConversationCmd`.
 
 #### `extractDocumentName` — `model.go:2045`
@@ -979,8 +979,8 @@ Key subtlety documented on `SearchQdrant` (lines 157-179): `candidateLimit` (req
 #### `SearchQdrant` — `qdrant.go:180`
 - **Signature:** `func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vector []float32, candidateLimit, docs int, filterKey, filterValue string, exact bool) (string, []QdrantPoint, error)`
 - **Purpose:** The capped/HNSW search path — one server-side similarity query returning joined text + points.
-- **Implementation:** `POST {baseURL}/collections/{collection}/points/query` with `QdrantQueryRequest{Query: vector, Using: QdrantVectorName, Filter, Limit: candidateLimit, WithPayload: true}`; adds `Params: {Exact: true}` only when `exact`. Filter construction is INLINED (same logic as `buildFilter` at 676, not factored out): filterKey matching any `DocumentIDKeys` (case-insensitive) or `*`/`any_file` → `Should` list across all `DocumentIDKeys`; else single `Must` with `Match.Value`. Auth via `api-key` header when non-empty. `newHTTPClient(HTTPTimeout)`; non-200 → `qdrantStatusError`. After decode: truncate `Result` to `docs`, mark all `IsPrimary = true`, extract text, join with `"\n---\n"`. No retries; cancellation via request context.
-- **Calls / Called by:** Calls `pt.ExtractText`, `qdrantStatusError`, `newHTTPClient`. Called from `commands.go:231` (capped path).
+- **Implementation:** `POST {baseURL}/collections/{collection}/points/query` with `QdrantQueryRequest{Query: vector, Using: QdrantVectorName, Filter, Limit: candidateLimit, WithPayload: true}`; adds `Params: {Exact: true}` only when `exact`. Filter construction delegates to `buildFilter(filterKey, filterValue)`. Auth via `api-key` header when non-empty. `newHTTPClient(HTTPTimeout)`; non-200 → `qdrantStatusError`. After decode: truncate `Result` to `docs`, mark all `IsPrimary = true`, extract text, join with `"\n---\n"`. No retries; cancellation via request context.
+- **Calls / Called by:** Calls `buildFilter`, `pt.ExtractText`, `qdrantStatusError`, `newHTTPClient`. Called from `commands.go:231` (capped path).
 
 #### `getPayloadKeys` — `qdrant.go:280`
 - **Signature:** `func getPayloadKeys(payload map[string]interface{}) []string`
@@ -1465,7 +1465,7 @@ Consolidated index of the per-section recipes above. Each links to the detailed 
 | **Add a new keybinding** | `case tea.Key*:` in `Update`'s main key switch (model.go:500-646), after the confirm-dialog blocks. Return a cmd, set `statusMsg`, call `updateViewport()`. → [model.go extension points](#root-package--modelgo-the-tui-model--fsm) |
 | **Add a new search mode** | New mode string in `/search` (`slash.go:174`); branch in `searchQdrantCmd` (`commands.go:200`) before the default path; exported `rag` function returning context + points + primaries + `ExpansionMap`. Compose with rerank via `ApplyExpansionToPrimaries` rather than eager expansion. → [qdrant.go extension points](#internal-rag--qdrantgo-vector-db-client) |
 | **Add a new Qdrant API call** | Wire structs near the top of `qdrant.go`; `POST/GET /collections/{c}/...` with `api-key` header; `newHTTPClient(<timeout>)`; `qdrantStatusError` for non-200; cursor-paginate via `scrollWithFilter` template. → [qdrant.go extension points](#internal-rag--qdrantgo-vector-db-client) |
-| **Add a new filter type** | Extend `QdrantFieldCondition` **and keep both sides in sync**: `buildFilter` (server pushdown) + `applyFilter` (client-side cache path) — `SearchQdrant` re-implements the logic inline, so change it too (or refactor it onto `buildFilter`). `must_not` is unrepresented. → [qdrant.go extension points](#internal-rag--qdrantgo-vector-db-client) |
+| **Add a new filter type** | Extend `QdrantFieldCondition` **and keep both sides in sync**: `buildFilter` (server pushdown, used by `SearchQdrant` and filtered scrolls) + `applyFilter` (client-side cache path). `must_not` is unrepresented. → [qdrant.go extension points](#internal-rag--qdrantgo-vector-db-client) |
 | **Add a new provider/endpoint (LLM-style)** | URL via `AppendAPIPath`; wire structs; `newHTTPClient(HTTPTimeout)` for request/response, `newHTTPClient(0)` for streaming; `Authorization: Bearer` (+ `api-key` header if Azure-style gateways matter); include body text in non-200 errors. For schema-flexible providers, copy the `Rerank` fallback pattern. → [rag support extension points](#internal-rag--support-clients-httpclientgo-embeddingsgo-litellmgo-rerankgo-cachego) |
 | **Add a cache field / change invalidation** | Write unconditionally in `SaveCorpusCache`, read behind `if version >= N` in `parseCacheBytes`, **bump `cacheVersion`** (old files become cold caches). Invalidation semantics all live in `IsStale`. Atomicity = tmp-file + rename. → [rag support extension points](#internal-rag--support-clients-httpclientgo-embeddingsgo-litellmgo-rerankgo-cachego) |
 | **Surface new SSE delta fields** | Extend the anonymous chunk struct (`litellm.go:196-205`) and `Next`'s contract; `commands.go:344` is the only call site. → [rag support extension points](#internal-rag--support-clients-httpclientgo-embeddingsgo-litellmgo-rerankgo-cachego) |
@@ -1474,16 +1474,6 @@ Consolidated index of the per-section recipes above. Each links to the detailed 
 
 ### Known quirks & gotchas (verified against source)
 
-1. **`/help` is incomplete**: omits `/rewrite`, `/exact`, `/write` alias.
-2. **`scrollOneRange` hardcodes `file_name`** (`qdrant.go:1755`) as the doc-identity key for expansion scrolls — collections using other `DocumentIDKeys` (e.g. `source`, `title`) get no adjacent-chunk expansion.
-3. **`SearchQdrant` duplicates `buildFilter` inline** (`qdrant.go:183-216`) — filter changes must touch both.
-4. **`ContextLimit` "0 disables compaction" comment is wrong** (`config.go:181-185`): 0 is defaulted to 131072; only a negative value disables.
-5. **`--safe` is force-on only** (`config.go:169-171`): no CLI/env way to turn confirmation off once set in JSON.
-6. **`renderHeader`'s status switch misses confirm states** (model.go:994-1013): `stateConfirmQuit`/`stateConfirmSkill` render an empty `[STATUS]`.
-7. **`chunks %d of %d` in references panel** (`model.go:1971-1973`) uses the range max (`hi`) as "total" — cosmetic mislabel, not a real count.
-8. **`condenseQueryForRetrieval` keyword matching is substring-based** (`commands.go:90-97`): `"it"` matches inside `"with"` — follow-ups are over-detected (intentional bias toward recall).
-9. **`rag.QdrantVectorName` and `rag.HTTPTimeout` are mutable package globals** set as side effects by `NewModel`, `/conf`, and `GetCollectionInfo` — tests that mutate them should reset.
-10. **`saveSession` drops `Reasoning`** — thinking text is not persisted across sessions (render caches too).
-11. **Integer env parsing ignores invalid values silently** (`config.go:139-163`) — a typo'd `SEARCH_CAP=abc` is quietly dropped.
-12. **`loadSession` restores `searchLimit` only when > 0** (`model.go:2286+`) — a session saved with limit 0 (impossible via `/limit` validation, but possible in a hand-edited file) falls back to the config default.
-13. **The skill confirm dialog only gates once per session** once "A" (allow-always) is pressed — `skillsAlwaysAllowed` is never reset, including across `/conf` profile switches.
+1. **`rag.QdrantVectorName` and `rag.HTTPTimeout` are mutable package globals** set as side effects by `NewModel`, `/conf`, and `GetCollectionInfo` — tests that mutate them should reset.
+2. **`condenseQueryForRetrieval` follow-up detection** uses word-boundary token matching with heuristic bias toward conversational recall on queries <= 8 words.
+3. **Session persistence and rendering**: `saveSession` persists full conversation turns and `Reasoning`, while cached terminal markdown glamour buffers are recalculated per terminal size on session restore.

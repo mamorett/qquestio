@@ -270,6 +270,65 @@ func TestLoadConfig_MultipleProfiles(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_ContextLimitZero(t *testing.T) {
+	os.Clearenv()
+	t.Setenv("QDRANT_URL", "http://localhost:6333")
+	t.Setenv("QDRANT_API_KEY", "test-key")
+	t.Setenv("EMBEDDING_URL", "http://localhost:8080")
+	t.Setenv("EMBEDDING_MODEL", "nomic-embed")
+	t.Setenv("OPENAI_URL", "http://localhost:4000")
+	t.Setenv("OPENAI_MODEL", "llama3")
+	t.Setenv("DEFAULT_COLLECTION", "documents")
+	t.Setenv("CONTEXT_LIMIT", "0")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ContextLimit != 0 {
+		t.Errorf("expected ContextLimit to be 0 (disabled), got %d", cfg.ContextLimit)
+	}
+}
+
+func TestLoadConfig_SkillsConfirmEnv(t *testing.T) {
+	os.Clearenv()
+	jsonContent := `{
+		"qdrant_url": "http://localhost:6333",
+		"qdrant_api_key": "test-key",
+		"embedding_url": "http://localhost:8080",
+		"embedding_model": "nomic-embed",
+		"openai_url": "http://localhost:4000",
+		"openai_model": "llama3",
+		"default_collection": "documents",
+		"skills_require_confirm": true
+	}`
+	err := os.WriteFile("config.json", []byte(jsonContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config.json: %v", err)
+	}
+	defer os.Remove("config.json")
+
+	// 1. Env 0 disables confirmation
+	t.Setenv("QQUESTIO_SKILLS_REQUIRE_CONFIRM", "0")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.SkillsRequireConfirm {
+		t.Errorf("expected SkillsRequireConfirm to be false when env is 0")
+	}
+
+	// 2. Env 1 enables confirmation
+	t.Setenv("QQUESTIO_SKILLS_REQUIRE_CONFIRM", "1")
+	cfg, err = LoadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.SkillsRequireConfirm {
+		t.Errorf("expected SkillsRequireConfirm to be true when env is 1")
+	}
+}
+
 // helper contains check
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || (s[0:len(substr)] == substr || stringsContains(s, substr)))
