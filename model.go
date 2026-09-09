@@ -669,9 +669,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.rerankPointsCmd(msg))
 		} else {
 			m.state = stateStreaming
-			docCount := len(msg.points)
-			m.statusMsg = fmt.Sprintf("Generating response... (%d docs retrieved)", docCount)
-			cmds = append(cmds, m.startLLMStreamCmd())
+			messages := m.buildPromptMessages()
+			m.currentPromptEstimate = estimateChatMessageTokens(messages)
+			ctx, cancel := context.WithCancel(m.ctx)
+			m.cancelRequest = cancel
+
+			docCount := len(m.lastPoints)
+			m.statusMsg = fmt.Sprintf("Generating response... (%d docs)", docCount)
+			cmds = append(cmds, m.startLLMStreamCmd(ctx, messages))
 		}
 
 	case rerankResultMsg:
@@ -680,13 +685,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastPoints = msg.points
 		m.maybeAutoCompact()
 		m.state = stateStreaming
-		docCount := len(msg.points)
+		messages := m.buildPromptMessages()
+		m.currentPromptEstimate = estimateChatMessageTokens(messages)
+		ctx, cancel := context.WithCancel(m.ctx)
+		m.cancelRequest = cancel
+
+		docCount := len(m.lastPoints)
 		if msg.degraded {
 			m.statusMsg = "Reranker unavailable — using vector ranking"
 		} else {
 			m.statusMsg = fmt.Sprintf("Generating response... (%d docs)", docCount)
 		}
-		cmds = append(cmds, m.startLLMStreamCmd())
+		cmds = append(cmds, m.startLLMStreamCmd(ctx, messages))
 
 	case streamChunkMsg:
 		if msg.done {
@@ -764,7 +774,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.output = ""
 		m.state = stateStreaming
 		m.statusMsg = fmt.Sprintf("Generating response (resumed after '%s')...", msg.name)
-		cmds = append(cmds, m.startLLMStreamCmd())
+		
+		messages := m.buildPromptMessages()
+		m.currentPromptEstimate = estimateChatMessageTokens(messages)
+		ctx, cancel := context.WithCancel(m.ctx)
+		m.cancelRequest = cancel
+		
+		cmds = append(cmds, m.startLLMStreamCmd(ctx, messages))
 
 	case appErrMsg:
 		if m.stoppedByUser {
@@ -2027,17 +2043,25 @@ func formatReferences(points []rag.QdrantPoint, width int) string {
 		for _, p := range pts {
 			idx := extractIdx(p)
 			idxTag := ""
-			if idx >= 0 {
-				if p.OriginalScore != 0 {
-					idxTag = fmt.Sprintf(" (chunk %d, score %.4f, db cosine %.4f)", idx, p.Score, p.OriginalScore)
+			if p.IsPrimary {
+				if idx >= 0 {
+					if p.OriginalScore != 0 {
+						idxTag = fmt.Sprintf(" (chunk %d, score %.4f, db cosine %.4f)", idx, p.Score, p.OriginalScore)
+					} else {
+						idxTag = fmt.Sprintf(" (chunk %d, score %.4f)", idx, p.Score)
+					}
 				} else {
-					idxTag = fmt.Sprintf(" (chunk %d, score %.4f)", idx, p.Score)
+					if p.OriginalScore != 0 {
+						idxTag = fmt.Sprintf(" (score %.4f, db cosine %.4f)", p.Score, p.OriginalScore)
+					} else {
+						idxTag = fmt.Sprintf(" (score %.4f)", p.Score)
+					}
 				}
 			} else {
-				if p.OriginalScore != 0 {
-					idxTag = fmt.Sprintf(" (score %.4f, db cosine %.4f)", p.Score, p.OriginalScore)
+				if idx >= 0 {
+					idxTag = fmt.Sprintf(" (chunk %d, expanded context)", idx)
 				} else {
-					idxTag = fmt.Sprintf(" (score %.4f)", p.Score)
+					idxTag = " (expanded context)"
 				}
 			}
 			sb.WriteString(metaStyle.Render("    • chunk") + idxTag + "\n")

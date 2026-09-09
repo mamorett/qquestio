@@ -28,6 +28,7 @@ type GenericRerankItem struct {
 	Index          interface{} `json:"index"`
 	Score          *float64    `json:"score"`
 	RelevanceScore *float64    `json:"relevance_score"`
+	Relevance      *float64    `json:"relevance"`
 	Document       interface{} `json:"document"`
 }
 
@@ -153,6 +154,8 @@ func Rerank(ctx context.Context, baseURL, apiKey, model, query string, texts []s
 				score = *item.Score
 			} else if item.RelevanceScore != nil {
 				score = *item.RelevanceScore
+			} else if item.Relevance != nil {
+				score = *item.Relevance
 			}
 			items = append(items, RerankItem{Index: idx, Score: score})
 		}
@@ -188,6 +191,8 @@ func Rerank(ctx context.Context, baseURL, apiKey, model, query string, texts []s
 				score = *item.Score
 			} else if item.RelevanceScore != nil {
 				score = *item.RelevanceScore
+			} else if item.Relevance != nil {
+				score = *item.Relevance
 			}
 			items = append(items, RerankItem{Index: idx, Score: score})
 		}

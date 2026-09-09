@@ -188,7 +188,13 @@ func (m *Model) computeRerankerPool() int {
 		pool = 10
 	}
 	if pool > 20 {
-		pool = 20
+		if m.searchLimit <= 20 {
+			pool = 20
+		} else {
+			// If the user explicitly requested a search limit > 20, the reranker
+			// pool MUST be at least as large as the requested limit to satisfy it.
+			pool = m.searchLimit
+		}
 	}
 	return pool
 }
@@ -260,10 +266,16 @@ func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 		// used as a fallback when Qdrant refuses params.exact=true.
 		if m.searchMode == "local" || m.exactPhrase != "" {
 			forceRefresh := m.cacheForceRefresh
+			
+			actualLimit := searchDocs
+			if m.cfg.RerankerURL == "" || m.disableReranker || m.exactPhrase != "" {
+				actualLimit = m.searchLimit
+			}
+			
 			results, points, fromCache, err := rag.SearchQdrantFullCorpus(
 				m.ctx, m.cfg.QdrantURL, m.cfg.QdrantAPIKey,
 				m.collection, vector,
-				searchDocs,
+				actualLimit,
 				m.filterKey, m.filterValue,
 				m.qdrantPoints,
 				forceRefresh,
@@ -291,10 +303,16 @@ func (m *Model) searchQdrantCmd(vector []float32) tea.Cmd {
 		// In "auto" mode (default), we use exact=true when uncapped to match
 		// documented behavior: exact brute-force when cap=0, HNSW when capped.
 		exact := m.searchMode == "exact" || m.searchMode == "auto"
+		
+		actualLimit := searchDocs
+		if m.cfg.RerankerURL == "" || m.disableReranker || m.exactPhrase != "" {
+			actualLimit = m.searchLimit
+		}
+		
 		res, err := rag.SearchWithContextExpansionDetailed(
 			m.ctx, m.cfg.QdrantURL, m.cfg.QdrantAPIKey,
 			m.collection, vector,
-			searchDocs, expand,
+			actualLimit, expand,
 			m.filterKey, m.filterValue,
 			exact,
 		)
@@ -345,15 +363,8 @@ func (m *Model) preloadCacheInfoCmd() tea.Cmd {
 }
 
 // startLLMStreamCmd (Stage 3 start) triggers streaming completions from LiteLLM.
-func (m *Model) startLLMStreamCmd() tea.Cmd {
+func (m *Model) startLLMStreamCmd(ctx context.Context, messages []rag.ChatMessage) tea.Cmd {
 	return func() tea.Msg {
-		messages := m.buildPromptMessages() // system + history + RAG context + user query
-		// Keep a fallback estimate for providers that do not return usage
-		// metadata in their streaming response.
-		m.currentPromptEstimate = estimateChatMessageTokens(messages)
-		ctx, cancel := context.WithCancel(m.ctx)
-		m.cancelRequest = cancel
-
 		reader, err := rag.StartLiteLLMStream(ctx, m.cfg.OpenAIURL, m.cfg.OpenAIAPIKey, m.cfg.OpenAIModel, m.cfg.OpenAIMaxTokens, m.cfg.ContextLimit, messages)
 		if err != nil {
 			return appErrMsg{err: err, reason: "LLM connection failed", stage: "stream"}
@@ -503,9 +514,11 @@ func (m *Model) rerankPointsCmd(result searchResultMsg) tea.Cmd {
 
 		// Map rerank scores back to the primaries slice using validIndices.
 		scoreMap := make(map[int]float64)
-		for i, item := range rerankItems {
-			originalIdx := validIndices[i]
-			scoreMap[originalIdx] = item.Score
+		for _, item := range rerankItems {
+			if item.Index >= 0 && item.Index < len(validIndices) {
+				originalIdx := validIndices[item.Index]
+				scoreMap[originalIdx] = item.Score
+			}
 		}
 
 		// Sort the primaries by rerank score descending.
@@ -649,7 +662,39 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 			if docName == "" {
 				docName = fmt.Sprintf("ID %s", pointIDStr)
 			}
-			chunkStr := fmt.Sprintf("--- Chunk %d | Document: %s ---\n%s\n", i+1, docName, textStr)
+			
+			chunkIndex := -1
+			if pt.Payload != nil {
+				for _, k := range []string{"chunk_index", "chunk", "idx", "index"} {
+					if v, ok := pt.Payload[k]; ok {
+						switch n := v.(type) {
+						case float64:
+							chunkIndex = int(n)
+						case int:
+							chunkIndex = n
+						case int64:
+							chunkIndex = int(n)
+						case string:
+							var ci int
+							if _, err := fmt.Sscanf(n, "%d", &ci); err == nil {
+								chunkIndex = ci
+							}
+						}
+					}
+					if chunkIndex >= 0 {
+						break
+					}
+				}
+			}
+			
+			var chunkLabel string
+			if chunkIndex >= 0 {
+				chunkLabel = fmt.Sprintf("Chunk %d", chunkIndex)
+			} else {
+				chunkLabel = fmt.Sprintf("Item %d", i+1)
+			}
+			
+			chunkStr := fmt.Sprintf("--- %s | Document: %s ---\n%s\n", chunkLabel, docName, textStr)
 			chunkTokens := estimateTokens(chunkStr)
 
 			if m.cfg.ContextLimit > 0 {
@@ -657,7 +702,7 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 					break
 				}
 				if chunkTokens > remainingBudget {
-					prefixHeader := fmt.Sprintf("--- Chunk %d | Document: %s ---\n", i+1, docName)
+					prefixHeader := fmt.Sprintf("--- %s | Document: %s ---\n", chunkLabel, docName)
 					headerTokens := estimateTokens(prefixHeader)
 					if remainingBudget <= headerTokens {
 						break
@@ -679,8 +724,12 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 		}
 		if includedChunks > 0 {
 			contextBuilder.WriteString("---\n\n")
+			if includedChunks < len(m.lastPoints) {
+				m.lastPoints = m.lastPoints[:includedChunks]
+			}
 		} else {
 			contextBuilder.Reset()
+			m.lastPoints = nil
 		}
 	}
 

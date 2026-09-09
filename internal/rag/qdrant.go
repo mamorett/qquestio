@@ -843,6 +843,8 @@ func topNByCosine(
 	sort.SliceStable(merged, func(i, j int) bool { return merged[i].score > merged[j].score })
 	out := make([]QdrantPoint, len(merged))
 	for i, sp := range merged {
+		sp.point.Score = sp.score
+		sp.point.IsPrimary = true
 		out[i] = sp.point
 	}
 	return out, nil
@@ -895,6 +897,8 @@ func topNAllParallel(query []float32, qNorm float32, points []QdrantPoint, progr
 	sort.SliceStable(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
 	out := make([]QdrantPoint, len(scored))
 	for i, sp := range scored {
+		sp.point.Score = sp.score
+		sp.point.IsPrimary = true
 		out[i] = sp.point
 	}
 	return out, nil
@@ -908,6 +912,7 @@ type scoredPoint struct {
 func scorePoint(query []float32, qNorm float32, p QdrantPoint, origIdx int) scoredPoint {
 	if len(p.Vector) != len(query) {
 		// Skip dimension-mismatched points (they cannot be scored).
+		p.Score = -1
 		return scoredPoint{point: p, score: -1}
 	}
 	var dot, pNorm float32
@@ -916,9 +921,11 @@ func scorePoint(query []float32, qNorm float32, p QdrantPoint, origIdx int) scor
 		pNorm += v * v
 	}
 	if pNorm == 0 {
+		p.Score = 0
 		return scoredPoint{point: p, score: 0}
 	}
 	score := dot / (qNorm * float32(math.Sqrt(float64(pNorm))))
+	p.Score = score
 	// Preserve the original index in case callers want it.
 	_ = origIdx
 	return scoredPoint{point: p, score: score}
@@ -1343,6 +1350,21 @@ func SearchWithContextExpansionDetailed(
 	for _, c := range docMap {
 		intervals := computeDocIntervals(c.indices, expand)
 		for _, iv := range intervals {
+			allPresent := true
+			if m, ok := res.ExpansionMap[c.docID]; ok {
+				for chunkIdx := iv.lo; chunkIdx <= iv.hi; chunkIdx++ {
+					if _, has := m[chunkIdx]; !has {
+						allPresent = false
+						break
+					}
+				}
+			} else {
+				allPresent = false
+			}
+			if allPresent {
+				continue
+			}
+
 			ranges = append(ranges, docRange{
 				docID:    c.docID,
 				docKey:   c.docKey,
@@ -1366,7 +1388,11 @@ func SearchWithContextExpansionDetailed(
 		if _, ok := res.ExpansionMap[docID]; !ok {
 			res.ExpansionMap[docID] = make(map[int]QdrantPoint)
 		}
-		res.ExpansionMap[docID][idx] = pt
+		// DO NOT overwrite existing chunks. Primary chunks placed here in Phase 1
+		// possess valid semantic Scores and IsPrimary flags. Scroll results have Score=0.
+		if _, exists := res.ExpansionMap[docID][idx]; !exists {
+			res.ExpansionMap[docID][idx] = pt
+		}
 	}
 
 	// Build the final context: for each primary hit, in original order, emit
@@ -1486,7 +1512,7 @@ func ApplyExpansionToPrimaries(
 
 	mutatedMap := make(map[interface{}]QdrantPoint)
 	for _, pt := range primaries {
-		mutatedMap[pt.ID] = pt
+		mutatedMap[idKey(pt.ID)] = pt
 	}
 
 	if expand == 0 || len(em) == 0 {
@@ -1565,7 +1591,7 @@ func ApplyExpansionToPrimaries(
 				if !ok {
 					continue
 				}
-				if mut, exists := mutatedMap[c.ID]; exists {
+				if mut, exists := mutatedMap[idKey(c.ID)]; exists {
 					c = mut
 				} else {
 					c.IsPrimary = false
@@ -1697,8 +1723,50 @@ func exactSearchWithPoints(
 	return strings.Join(texts, "\n---\n"), respBody.Result, nil
 }
 
-// scrollAdjacentChunks issues parallel /points/scroll requests to fetch chunks
-// in [lo, hi] for each (docID, range) tuple. The point vectors are NOT
+var (
+	payloadIndexMu sync.Mutex
+	payloadIndexed = make(map[string]bool)
+)
+
+func ensurePayloadIndex(ctx context.Context, baseURL, apiKey, collection, field, schema string) {
+	key := fmt.Sprintf("%s:%s:%s", collection, field, schema)
+	payloadIndexMu.Lock()
+	if payloadIndexed[key] {
+		payloadIndexMu.Unlock()
+		return
+	}
+	payloadIndexed[key] = true
+	payloadIndexMu.Unlock()
+
+	url := fmt.Sprintf("%s/collections/%s/index?wait=true", strings.TrimSuffix(baseURL, "/"), collection)
+	body := map[string]string{
+		"field_name":   field,
+		"field_schema": schema,
+	}
+	b, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(b))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("api-key", apiKey)
+	}
+	// Index creation on massive datasets can take a while, use no timeout.
+	client := newHTTPClient(0)
+	resp, err := client.Do(req)
+	if err == nil {
+		resp.Body.Close()
+	} else {
+		payloadIndexMu.Lock()
+		delete(payloadIndexed, key)
+		payloadIndexMu.Unlock()
+		log.Printf("[Qdrant] Failed to create %s index on %s: %v", schema, field, err)
+	}
+}
+
+// scrollAdjacentChunks issues a single /points/scroll request to fetch chunks
+// in [lo, hi] for all (docID, range) tuples. The point vectors are NOT
 // retrieved (with_vector: false) — we only need payloads + IDs.
 func scrollAdjacentChunks(
 	ctx context.Context,
@@ -1708,71 +1776,19 @@ func scrollAdjacentChunks(
 	if len(ranges) == 0 {
 		return nil
 	}
-	url := fmt.Sprintf("%s/collections/%s/points/scroll",
-		strings.TrimSuffix(baseURL, "/"), collection)
 
-	workers := runtime.NumCPU()
-	if workers < 1 {
-		workers = 1
+	type DocRangeMust struct {
+		Must []QdrantFieldCondition `json:"must"`
 	}
-	if workers > len(ranges) {
-		workers = len(ranges)
+	type BatchFilter struct {
+		Should []DocRangeMust `json:"should"`
 	}
 
-	type job struct{ r docRange }
-	jobs := make(chan job, len(ranges))
+	var shouldClauses []DocRangeMust
+	docKeys := make(map[string]bool)
+	chunkKeys := make(map[string]bool)
+
 	for _, r := range ranges {
-		jobs <- job{r: r}
-	}
-	close(jobs)
-
-	results := make([][]QdrantPoint, len(ranges))
-	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-			for j := range jobs {
-				r := j.r
-				pts := scrollOneRange(ctx, url, apiKey, r)
-				// Find this range's index in the original slice (by docID+lo+hi).
-				idx := -1
-				for i, orig := range ranges {
-					if orig.docID == r.docID && orig.lo == r.lo && orig.hi == r.hi {
-						idx = i
-						break
-					}
-				}
-				if idx >= 0 {
-					results[idx] = pts
-				}
-				_ = workerID
-			}
-		}(w)
-	}
-	wg.Wait()
-
-	var all []QdrantPoint
-	for _, batch := range results {
-		all = append(all, batch...)
-	}
-	return all
-}
-
-// scrollOneRange performs a single /points/scroll for (docID, [lo, hi]) and
-// follows the next_page_offset cursor until exhausted.
-func scrollOneRange(ctx context.Context, url, apiKey string, r docRange) []QdrantPoint {
-	var all []QdrantPoint
-	var offset interface{}
-	client := newHTTPClient(60 * time.Second)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return all
-		default:
-		}
-
 		docKey := r.docKey
 		if docKey == "" {
 			docKey = "file_name"
@@ -1781,64 +1797,37 @@ func scrollOneRange(ctx context.Context, url, apiKey string, r docRange) []Qdran
 		if chunkKey == "" {
 			chunkKey = "chunk_index"
 		}
+		docKeys[docKey] = true
+		chunkKeys[chunkKey] = true
+
 		loF := float64(r.lo)
 		hiF := float64(r.hi)
-		reqBody := ScrollRequest{
-			Limit:       1024,
-			WithPayload: true,
-			WithVector:  false,
-			Offset:      offset,
-			Filter: &QdrantFilter{
-				Must: []QdrantFieldCondition{
-					{Key: docKey, Match: &QdrantMatch{Value: r.docID}},
-					{
-						Key:   chunkKey,
-						Range: &QdrantRange{Gte: &loF, Lte: &hiF},
-					},
-				},
+
+		shouldClauses = append(shouldClauses, DocRangeMust{
+			Must: []QdrantFieldCondition{
+				{Key: docKey, Match: &QdrantMatch{Value: r.docID}},
+				{Key: chunkKey, Range: &QdrantRange{Gte: &loF, Lte: &hiF}},
 			},
-		}
-
-		jsonData, err := json.Marshal(reqBody)
-		if err != nil {
-			return all
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(jsonData))
-		if err != nil {
-			return all
-		}
-		req.Header.Set("Content-Type", "application/json")
-		if apiKey != "" {
-			req.Header.Set("api-key", apiKey)
-		}
-
-		resp, err := client.Do(req)
-		if err != nil {
-			return all
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			body := make([]byte, 512)
-			n, _ := resp.Body.Read(body)
-			resp.Body.Close()
-			log.Printf("[scrollOneRange] HTTP %d %s (body: %s)", resp.StatusCode, resp.Status, string(body[:n]))
-			return all
-		}
-
-		var scrollResp ScrollResponse
-		if err := json.NewDecoder(resp.Body).Decode(&scrollResp); err != nil {
-			resp.Body.Close()
-			return all
-		}
-		resp.Body.Close()
-
-		all = append(all, scrollResp.Result.Points...)
-		if scrollResp.Result.NextPageOffset == nil {
-			break
-		}
-		offset = scrollResp.Result.NextPageOffset
+		})
 	}
-	return all
+
+	for k := range docKeys {
+		ensurePayloadIndex(ctx, baseURL, apiKey, collection, k, "keyword")
+	}
+	for k := range chunkKeys {
+		ensurePayloadIndex(ctx, baseURL, apiKey, collection, k, "integer")
+	}
+
+	filter := BatchFilter{
+		Should: shouldClauses,
+	}
+
+	points, err := scrollWithFilter(ctx, baseURL, apiKey, collection, filter)
+	if err != nil {
+		log.Printf("[scrollAdjacentChunks] batch scroll failed: %v", err)
+		return nil
+	}
+	return points
 }
 
 // ExtractQuotedPhrases parses raw query and returns all substrings that are inside quote pairs.
@@ -2065,10 +2054,13 @@ func scrollWithFilter(
 ) ([]QdrantPoint, error) {
 	url := fmt.Sprintf("%s/collections/%s/points/scroll", strings.TrimSuffix(baseURL, "/"), collection)
 
-	const batchSize = 100
+	const batchSize = 1000
 	var all []QdrantPoint
 	var offset interface{}
-	client := newHTTPClient(30 * time.Second)
+	// Massive unindexed queries (e.g., OR filters for multiple document intervals)
+	// can take minutes to scan huge collections. Delegate timeout control to the 
+	// request context instead of a hardcoded short HTTP timeout.
+	client := newHTTPClient(0)
 
 	for {
 		select {
