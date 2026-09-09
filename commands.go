@@ -566,10 +566,8 @@ func (m *Model) rerankPointsCmd(result searchResultMsg) tea.Cmd {
 	}
 }
 
-// buildPromptMessages formats the chat message slice for LiteLLM.
-func (m *Model) buildPromptMessages() []rag.ChatMessage {
-	msgs := []rag.ChatMessage{}
-
+// getEffectiveSystemPrompt returns the system prompt including custom overrides, mode defaults, and skill definitions.
+func (m *Model) getEffectiveSystemPrompt() string {
 	system := m.systemPrompt
 	if system == "" {
 		if m.ragMode == "hybrid" {
@@ -599,6 +597,14 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 			"CALL: bash ls -la\n" +
 			"Do not output anything else when calling a tool. Stop generating immediately after outputting the CALL block."
 	}
+	return system
+}
+
+// buildPromptMessages formats the chat message slice for LiteLLM.
+func (m *Model) buildPromptMessages() []rag.ChatMessage {
+	msgs := []rag.ChatMessage{}
+
+	system := m.getEffectiveSystemPrompt()
 	msgs = append(msgs, rag.ChatMessage{Role: "system", Content: system})
 
 	// 2. Conversation history (multi-turn)
@@ -611,7 +617,7 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 			msgs = append(msgs, rag.ChatMessage{Role: "user", Content: "Question: " + turn.Content})
 		} else if turn.Role == "assistant" {
 			msgs = append(msgs, rag.ChatMessage{Role: "assistant", Content: turn.Content})
-		} else if turn.Role == "system" && strings.HasPrefix(turn.Content, "[ Context compacted") {
+		} else if turn.Role == "system" && strings.HasPrefix(turn.Content, CompactionSummaryPrefix) {
 			// Include compaction summaries as user messages (not system) for better compatibility
 			msgs = append(msgs, rag.ChatMessage{
 				Role:    "user",
@@ -621,10 +627,19 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 		// Other system turns (slash feedback, warmup logs, skill logs) remain UI-only
 	}
 
-	// 3. Current user query with RAG context injected as structured chunks
+	// 3. Current user query with RAG context injected as structured chunks.
+	// When ContextLimit > 0, budget the injected chunks so prompt never exceeds limit.
+	baseTokens := estimateChatMessageTokens(msgs) + estimateTokens("Question: "+m.lastQuery) + estimateTokens("user")
+	headerOverhead := estimateTokens("Retrieved Context Chunks from Knowledge Base:\n---\n\n") + 5
+	remainingBudget := m.cfg.ContextLimit - baseTokens - headerOverhead
+	if m.cfg.ContextLimit <= 0 {
+		remainingBudget = 1000000000
+	}
+
 	var contextBuilder strings.Builder
 	if len(m.lastPoints) > 0 {
 		contextBuilder.WriteString("Retrieved Context Chunks from Knowledge Base:\n")
+		includedChunks := 0
 		for i, pt := range m.lastPoints {
 			source := extractDocumentName(pt.Payload)
 			textStr := pt.ExtractText()
@@ -634,13 +649,57 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 			if docName == "" {
 				docName = fmt.Sprintf("ID %s", pointIDStr)
 			}
-			contextBuilder.WriteString(fmt.Sprintf("--- Chunk %d | Document: %s ---\n%s\n", i+1, docName, textStr))
+			chunkStr := fmt.Sprintf("--- Chunk %d | Document: %s ---\n%s\n", i+1, docName, textStr)
+			chunkTokens := estimateTokens(chunkStr)
+
+			if m.cfg.ContextLimit > 0 {
+				if remainingBudget <= 0 {
+					break
+				}
+				if chunkTokens > remainingBudget {
+					prefixHeader := fmt.Sprintf("--- Chunk %d | Document: %s ---\n", i+1, docName)
+					headerTokens := estimateTokens(prefixHeader)
+					if remainingBudget <= headerTokens {
+						break
+					}
+					allowedTextChars := (remainingBudget - headerTokens) * 4
+					if allowedTextChars > 10 && allowedTextChars < len(textStr) {
+						textStr = textStr[:allowedTextChars] + "…"
+						chunkStr = fmt.Sprintf("%s%s\n", prefixHeader, textStr)
+						chunkTokens = estimateTokens(chunkStr)
+					} else {
+						break
+					}
+				}
+			}
+
+			contextBuilder.WriteString(chunkStr)
+			remainingBudget -= chunkTokens
+			includedChunks++
 		}
-		contextBuilder.WriteString("---\n\n")
+		if includedChunks > 0 {
+			contextBuilder.WriteString("---\n\n")
+		} else {
+			contextBuilder.Reset()
+		}
 	}
 
 	userMsg := fmt.Sprintf("%sQuestion: %s", contextBuilder.String(), m.lastQuery)
 	msgs = append(msgs, rag.ChatMessage{Role: "user", Content: userMsg})
+
+	// Final safeguard: if total prompt tokens exceed ContextLimit, trim user message
+	if m.cfg.ContextLimit > 0 {
+		for estimateChatMessageTokens(msgs) > m.cfg.ContextLimit && len(msgs[len(msgs)-1].Content) > 20 {
+			content := msgs[len(msgs)-1].Content
+			excess := estimateChatMessageTokens(msgs) - m.cfg.ContextLimit
+			trimChars := (excess + 5) * 4
+			if trimChars >= len(content) {
+				msgs[len(msgs)-1].Content = "Question: " + m.lastQuery
+				break
+			}
+			msgs[len(msgs)-1].Content = content[:len(content)-trimChars] + "…"
+		}
+	}
 
 	return msgs
 }

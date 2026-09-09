@@ -158,13 +158,19 @@ func estimateTokens(s string) int {
 }
 
 // estimateContextTokens returns a rough token count of what is ACTUALLY sent
-// to the LLM: conversation text and the current query's retrieved chunks.
+// to the LLM: system prompt, valid conversation turns, user query, and retrieved chunks.
 // Historical references remain available in the transcript, but are not
 // replayed into later prompts.
 func (m *Model) estimateContextTokens() int {
 	total := 0
+	total += estimateTokens(m.getEffectiveSystemPrompt())
 	for _, turn := range m.history {
-		total += estimateTokens(turn.Content)
+		if turn.Role == "user" || turn.Role == "assistant" || (turn.Role == "system" && strings.HasPrefix(turn.Content, CompactionSummaryPrefix)) {
+			total += estimateTokens(turn.Content)
+		}
+	}
+	if m.lastQuery != "" {
+		total += estimateTokens("Question: " + m.lastQuery)
 	}
 	// Count the current query's retrieved context (not yet in history)
 	for _, pt := range m.lastPoints {
@@ -271,28 +277,28 @@ func (m *Model) maybeAutoCompact() {
 	threshold := int(float64(m.cfg.ContextLimit) * 0.85)
 	target := int(float64(m.cfg.ContextLimit) * 0.75)
 
-	for m.estimateContextTokens() > threshold {
+	if m.estimateContextTokens() <= threshold {
+		return
+	}
+
+	for keep := 3; keep >= 1; keep-- {
 		before := len(m.history)
-		m.compactHistory(3)
+		m.compactHistory(keep)
 		after := len(m.history)
 
-		// If history stopped shrinking, break to avoid infinite loop
-		if after == before {
-			break
+		if after < before {
+			m.history = append(m.history, ConversationTurn{
+				Role: "system",
+				Content: fmt.Sprintf(
+					"[ Auto-compacted: %d entr%s removed — context reached ≥85%% of %s token limit ]",
+					before-after,
+					map[bool]string{true: "y", false: "ies"}[before-after == 1],
+					formatNumber(m.cfg.ContextLimit),
+				),
+			})
+			m.statusMsg = fmt.Sprintf("Context auto-compacted (≥85%% of %s token limit)", formatNumber(m.cfg.ContextLimit))
 		}
 
-		m.history = append(m.history, ConversationTurn{
-			Role: "system",
-			Content: fmt.Sprintf(
-				"[ Auto-compacted: %d entr%s removed — context reached ≥85%% of %s token limit ]",
-				before-after,
-				map[bool]string{true: "y", false: "ies"}[before-after == 1],
-				formatNumber(m.cfg.ContextLimit),
-			),
-		})
-		m.statusMsg = fmt.Sprintf("Context auto-compacted (≥85%% of %s token limit)", formatNumber(m.cfg.ContextLimit))
-
-		// Exit loop if under target budget
 		if m.estimateContextTokens() <= target {
 			break
 		}
@@ -653,6 +659,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case searchResultMsg:
 		m.refViewport.GotoTop()
+		m.ragContext = msg.context
+		m.lastPoints = msg.points
 		m.maybeAutoCompact()
 		if m.cfg.RerankerURL != "" && !m.disableReranker && m.exactPhrase == "" {
 			m.state = stateReranking
@@ -660,8 +668,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateViewport()
 			cmds = append(cmds, m.rerankPointsCmd(msg))
 		} else {
-			m.ragContext = msg.context
-			m.lastPoints = msg.points
 			m.state = stateStreaming
 			docCount := len(msg.points)
 			m.statusMsg = fmt.Sprintf("Generating response... (%d docs retrieved)", docCount)
@@ -670,9 +676,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case rerankResultMsg:
 		m.refViewport.GotoTop()
-		m.maybeAutoCompact()
 		m.ragContext = msg.context
 		m.lastPoints = msg.points
+		m.maybeAutoCompact()
 		m.state = stateStreaming
 		docCount := len(msg.points)
 		if msg.degraded {

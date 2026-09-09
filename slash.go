@@ -112,6 +112,32 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 			m.searchLimit = n
 			return slashResultMsg{feedback: fmt.Sprintf("Search limit → %d", n)}
 
+		case "/context", "/contextlimit", "/maxcontext", "/ctx":
+			if len(args) == 0 {
+				if m.cfg.ContextLimit <= 0 {
+					return slashResultMsg{feedback: "Context limit → off (unlimited)"}
+				}
+				return slashResultMsg{feedback: fmt.Sprintf("Context limit → %s tokens (%d)", formatNumber(m.cfg.ContextLimit), m.cfg.ContextLimit)}
+			}
+			arg := strings.ToLower(strings.TrimSpace(args[0]))
+			if arg == "off" || arg == "none" || arg == "0" || arg == "unlimited" {
+				m.cfg.ContextLimit = 0
+				return slashResultMsg{feedback: "Context limit disabled (unlimited)"}
+			}
+			newLimit, err := parseTokenLimit(args[0])
+			if err != nil || newLimit < 1 {
+				return appErrMsg{
+					err:    fmt.Errorf("/context requires a positive integer or 'off' (e.g. /context 128k, /context 131072, /context off)"),
+					reason: "Usage: /context <N|Nk|off> (e.g. /context 128k, /context 64000, /context off)",
+					stage:  "slash",
+				}
+			}
+			m.cfg.ContextLimit = newLimit
+			m.maybeAutoCompact()
+			m.updateViewport()
+			return slashResultMsg{feedback: fmt.Sprintf("Context limit → %s tokens (%d)", formatNumber(newLimit), newLimit)}
+
+
 		case "/mode":
 			if len(args) != 1 {
 				return appErrMsg{
@@ -535,6 +561,7 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				"  /collection <name>  - Switch the active Qdrant collection\n" +
 				"  /conf [name]        - View or switch the active configuration profile\n" +
 				"  /limit <1-100>      - Set the number of context documents to retrieve\n" +
+				"  /context [N|off]    - Set/view max context token limit at runtime (e.g. /context 128k, /context off)\n" +
 				"  /expand <N|off>     - ±N adjacent chunks from the same doc per match (0=off, 1=default)\n" +
 				"  /cap [N|off]        - Set/clear the candidate pool cap (0/no cap = full corpus)\n" +
 				"  /exact <phrase...>  - Directly search for an exact text phrase\n" +
@@ -575,4 +602,31 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 			}
 		}
 	}
+}
+
+// parseTokenLimit parses token limit strings such as "131072", "128k", "131k", "64k", "1m".
+func parseTokenLimit(raw string) (int, error) {
+	s := strings.TrimSpace(strings.ToLower(raw))
+	if s == "" {
+		return 0, fmt.Errorf("empty token limit")
+	}
+	multiplier := 1
+	if strings.HasSuffix(s, "k") {
+		multiplier = 1024
+		s = strings.TrimSuffix(s, "k")
+	} else if strings.HasSuffix(s, "m") {
+		multiplier = 1024 * 1024
+		s = strings.TrimSuffix(s, "m")
+	}
+	if multiplier == 1024 && s == "131" {
+		return 131072, nil
+	}
+	val, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, err
+	}
+	if val <= 0 {
+		return 0, fmt.Errorf("limit must be positive")
+	}
+	return int(val * float64(multiplier)), nil
 }

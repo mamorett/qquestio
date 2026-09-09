@@ -706,3 +706,58 @@ func TestSearchWithContextExpansion_CustomDocIDKey(t *testing.T) {
 		t.Errorf("expected expanded context to contain adjacent chunk text, got:\n%s", res.Context)
 	}
 }
+
+func TestComputeDocIntervals(t *testing.T) {
+	tests := []struct {
+		name     string
+		indices  []int
+		expand   int
+		expected []chunkInterval
+	}{
+		{
+			name:     "single index, expand 1",
+			indices:  []int{5},
+			expand:   1,
+			expected: []chunkInterval{{lo: 4, hi: 6}},
+		},
+		{
+			name:     "overlapping indices, expand 1",
+			indices:  []int{3, 4},
+			expand:   1,
+			expected: []chunkInterval{{lo: 2, hi: 5}},
+		},
+		{
+			name:     "disjoint indices far apart, expand 1 (prevents 200k explosion)",
+			indices:  []int{2, 500},
+			expand:   1,
+			expected: []chunkInterval{{lo: 1, hi: 3}, {lo: 499, hi: 501}},
+		},
+		{
+			name:     "near zero lo clamping",
+			indices:  []int{0},
+			expand:   2,
+			expected: []chunkInterval{{lo: 0, hi: 2}},
+		},
+		{
+			name:     "multiple overlapping and disjoint",
+			indices:  []int{10, 11, 20, 21, 100},
+			expand:   1,
+			expected: []chunkInterval{{lo: 9, hi: 12}, {lo: 19, hi: 22}, {lo: 99, hi: 101}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computeDocIntervals(tt.indices, tt.expand)
+			if len(got) != len(tt.expected) {
+				t.Fatalf("expected %d intervals, got %d: %+v", len(tt.expected), len(got), got)
+			}
+			for i := range got {
+				if got[i] != tt.expected[i] {
+					t.Errorf("interval %d: expected %+v, got %+v", i, tt.expected[i], got[i])
+				}
+			}
+		})
+	}
+}
+

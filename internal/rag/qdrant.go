@@ -1208,6 +1208,50 @@ func extractChunkIndex(p QdrantPoint) int {
 	idx, _ := extractChunkIndexAndKey(p)
 	return idx
 }
+// chunkInterval represents an inclusive [lo, hi] range of chunk indices.
+type chunkInterval struct {
+	lo int
+	hi int
+}
+
+// computeDocIntervals takes a list of chunk indices and an expand radius (±expand),
+// creates intervals for each index, and merges overlapping or adjacent intervals.
+func computeDocIntervals(indices []int, expand int) []chunkInterval {
+	if len(indices) == 0 {
+		return nil
+	}
+	if expand < 0 {
+		expand = 0
+	}
+	sorted := make([]int, len(indices))
+	copy(sorted, indices)
+	sort.Ints(sorted)
+
+	var raw []chunkInterval
+	for _, idx := range sorted {
+		lo := idx - expand
+		if lo < 0 {
+			lo = 0
+		}
+		hi := idx + expand
+		raw = append(raw, chunkInterval{lo: lo, hi: hi})
+	}
+
+	var merged []chunkInterval
+	cur := raw[0]
+	for i := 1; i < len(raw); i++ {
+		if raw[i].lo <= cur.hi+1 { // overlapping or adjacent
+			if raw[i].hi > cur.hi {
+				cur.hi = raw[i].hi
+			}
+		} else {
+			merged = append(merged, cur)
+			cur = raw[i]
+		}
+	}
+	merged = append(merged, cur)
+	return merged
+}
 
 // SearchWithContextExpansionDetailed is the rich version of SearchWithContextExpansion
 // that exposes the full expansion pipeline data. See the type ContextExpansionResult
@@ -1265,7 +1309,13 @@ func SearchWithContextExpansionDetailed(
 	}
 
 	// Phase 2: group by document, compute expansion ranges.
-	docMap := make(map[string]*docRange)
+	type docCollect struct {
+		docID    string
+		docKey   string
+		chunkKey string
+		indices  []int
+	}
+	docMap := make(map[string]*docCollect)
 	for _, pt := range primaryPoints {
 		docID, docKey := extractDocIDAndKey(pt)
 		if docID == "" {
@@ -1275,17 +1325,12 @@ func SearchWithContextExpansionDetailed(
 		if idx < 0 {
 			continue
 		}
-		r, ok := docMap[docID]
+		c, ok := docMap[docID]
 		if !ok {
-			docMap[docID] = &docRange{docID: docID, docKey: docKey, chunkKey: chunkKey, lo: idx - expand, hi: idx + expand}
+			docMap[docID] = &docCollect{docID: docID, docKey: docKey, chunkKey: chunkKey, indices: []int{idx}}
 			continue
 		}
-		if idx-expand < r.lo {
-			r.lo = idx - expand
-		}
-		if idx+expand > r.hi {
-			r.hi = idx + expand
-		}
+		c.indices = append(c.indices, idx)
 	}
 	if len(docMap) == 0 {
 		// No chunk_index metadata; return primary results unchanged.
@@ -1294,9 +1339,18 @@ func SearchWithContextExpansionDetailed(
 	}
 
 	// Phase 3: parallel scroll for each (docID, range).
-	ranges := make([]docRange, 0, len(docMap))
-	for _, r := range docMap {
-		ranges = append(ranges, *r)
+	var ranges []docRange
+	for _, c := range docMap {
+		intervals := computeDocIntervals(c.indices, expand)
+		for _, iv := range intervals {
+			ranges = append(ranges, docRange{
+				docID:    c.docID,
+				docKey:   c.docKey,
+				chunkKey: c.chunkKey,
+				lo:       iv.lo,
+				hi:       iv.hi,
+			})
+		}
 	}
 	scrollResults := scrollAdjacentChunks(ctx, baseURL, apiKey, collection, ranges)
 
@@ -1344,7 +1398,7 @@ func SearchWithContextExpansionDetailed(
 		}
 		seenSlices[docID] = true
 
-		r, ok := docMap[docID]
+		c, ok := docMap[docID]
 		if !ok {
 			sb.WriteString(pt.ExtractText())
 			sb.WriteString("\n---\n")
@@ -1352,13 +1406,16 @@ func SearchWithContextExpansionDetailed(
 			continue
 		}
 
+		intervals := computeDocIntervals(c.indices, expand)
 		var docChunks []QdrantPoint
-		for i := r.lo; i <= r.hi; i++ {
-			c, ok := res.ExpansionMap[docID][i]
-			if !ok {
-				continue
+		for _, iv := range intervals {
+			for i := iv.lo; i <= iv.hi; i++ {
+				chunk, ok := res.ExpansionMap[docID][i]
+				if !ok {
+					continue
+				}
+				docChunks = append(docChunks, chunk)
 			}
-			docChunks = append(docChunks, c)
 		}
 		if len(docChunks) == 0 {
 			continue
@@ -1368,13 +1425,13 @@ func SearchWithContextExpansionDetailed(
 			return extractChunkIndex(docChunks[i]) < extractChunkIndex(docChunks[j])
 		})
 
-		for _, c := range docChunks {
-			text := c.ExtractText()
+		for _, chunk := range docChunks {
+			text := chunk.ExtractText()
 			if text != "" {
 				sb.WriteString(text)
 				sb.WriteString("\n---\n")
 			}
-			totalPoints = append(totalPoints, c)
+			totalPoints = append(totalPoints, chunk)
 		}
 	}
 
@@ -1444,9 +1501,8 @@ func ApplyExpansionToPrimaries(
 		return sb.String(), primaries
 	}
 
-	// Group primaries by docID; compute window per doc.
-	type window struct{ lo, hi int }
-	windows := make(map[string]*window)
+	// Group primary indices by docID
+	docIndices := make(map[string][]int)
 	for _, pt := range primaries {
 		docID := extractDocID(pt)
 		if docID == "" {
@@ -1456,17 +1512,7 @@ func ApplyExpansionToPrimaries(
 		if idx < 0 {
 			continue
 		}
-		w, ok := windows[docID]
-		if !ok {
-			windows[docID] = &window{lo: idx - expand, hi: idx + expand}
-			continue
-		}
-		if idx-expand < w.lo {
-			w.lo = idx - expand
-		}
-		if idx+expand > w.hi {
-			w.hi = idx + expand
-		}
+		docIndices[docID] = append(docIndices[docID], idx)
 	}
 
 	var sb strings.Builder
@@ -1497,8 +1543,8 @@ func ApplyExpansionToPrimaries(
 		}
 		seenSlices[docID] = true
 
-		w := windows[docID]
-		if w == nil {
+		indices, ok := docIndices[docID]
+		if !ok || len(indices) == 0 {
 			if t := pt.ExtractText(); t != "" {
 				sb.WriteString(t)
 				sb.WriteString("\n---\n")
@@ -1507,22 +1553,25 @@ func ApplyExpansionToPrimaries(
 			continue
 		}
 
+		intervals := computeDocIntervals(indices, expand)
 		var docChunks []QdrantPoint
 		docIdxMap, ok := em[docID]
 		if !ok {
 			continue
 		}
-		for i := w.lo; i <= w.hi; i++ {
-			c, ok := docIdxMap[i]
-			if !ok {
-				continue
+		for _, iv := range intervals {
+			for i := iv.lo; i <= iv.hi; i++ {
+				c, ok := docIdxMap[i]
+				if !ok {
+					continue
+				}
+				if mut, exists := mutatedMap[c.ID]; exists {
+					c = mut
+				} else {
+					c.IsPrimary = false
+				}
+				docChunks = append(docChunks, c)
 			}
-			if mut, exists := mutatedMap[c.ID]; exists {
-				c = mut
-			} else {
-				c.IsPrimary = false
-			}
-			docChunks = append(docChunks, c)
 		}
 		if len(docChunks) == 0 {
 			continue

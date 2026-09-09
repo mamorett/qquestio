@@ -562,4 +562,108 @@ func TestHandleSlashCmd_Help(t *testing.T) {
 	if !strings.Contains(logMsg.content, "/write") {
 		t.Errorf("expected /help to include /write alias")
 	}
+	if !strings.Contains(logMsg.content, "/context") {
+		t.Errorf("expected /help to include /context")
+	}
+}
+
+func TestHandleSlashCmd_Context(t *testing.T) {
+	cfg := Config{DefaultCollection: "default", ContextLimit: 131072}
+	m := NewModel(context.Background(), cfg)
+
+	// 1. /context with no args -> displays current limit
+	cmd := m.handleSlashCmd("/context")
+	msg := cmd()
+	res, ok := msg.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msg)
+	}
+	if !strings.Contains(res.feedback, "131,072") {
+		t.Errorf("expected feedback to contain 131,072, got %q", res.feedback)
+	}
+
+	// 2. /context 64k -> sets limit to 65536
+	cmd = m.handleSlashCmd("/context 64k")
+	msg = cmd()
+	res, ok = msg.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msg)
+	}
+	if m.cfg.ContextLimit != 65536 {
+		t.Errorf("expected ContextLimit to be 65536, got %d", m.cfg.ContextLimit)
+	}
+	if !strings.Contains(res.feedback, "65,536") {
+		t.Errorf("expected feedback to contain 65,536, got %q", res.feedback)
+	}
+
+	// 3. /context off -> disables limit (0)
+	cmd = m.handleSlashCmd("/context off")
+	msg = cmd()
+	res, ok = msg.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msg)
+	}
+	if m.cfg.ContextLimit != 0 {
+		t.Errorf("expected ContextLimit to be 0, got %d", m.cfg.ContextLimit)
+	}
+
+	// 4. /context 200000 -> sets numeric limit
+	cmd = m.handleSlashCmd("/context 200000")
+	msg = cmd()
+	res, ok = msg.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msg)
+	}
+	if m.cfg.ContextLimit != 200000 {
+		t.Errorf("expected ContextLimit to be 200000, got %d", m.cfg.ContextLimit)
+	}
+
+	// 5. /ctx alias
+	cmd = m.handleSlashCmd("/ctx 128k")
+	msg = cmd()
+	res, ok = msg.(slashResultMsg)
+	if !ok {
+		t.Fatalf("expected slashResultMsg, got %T", msg)
+	}
+	if m.cfg.ContextLimit != 131072 {
+		t.Errorf("expected ContextLimit to be 131072, got %d", m.cfg.ContextLimit)
+	}
+
+	// 6. Invalid argument -> appErrMsg
+	cmd = m.handleSlashCmd("/context invalid_val")
+	msg = cmd()
+	_, isErr := msg.(appErrMsg)
+	if !isErr {
+		t.Fatalf("expected appErrMsg for invalid limit, got %T", msg)
+	}
+}
+
+func TestParseTokenLimit(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected int
+		err      bool
+	}{
+		{"131072", 131072, false},
+		{"128k", 131072, false},
+		{"131k", 131072, false},
+		{"64k", 65536, false},
+		{"32k", 32768, false},
+		{"1m", 1048576, false},
+		{"200000", 200000, false},
+		{"-100", 0, true},
+		{"", 0, true},
+		{"abc", 0, true},
+	}
+
+	for _, tt := range tests {
+		got, err := parseTokenLimit(tt.input)
+		if (err != nil) != tt.err {
+			t.Errorf("parseTokenLimit(%q) unexpected err: %v", tt.input, err)
+			continue
+		}
+		if !tt.err && got != tt.expected {
+			t.Errorf("parseTokenLimit(%q) = %d, expected %d", tt.input, got, tt.expected)
+		}
+	}
 }

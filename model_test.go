@@ -495,3 +495,83 @@ func TestLongPromptAndUserTurnWrap(t *testing.T) {
 		t.Fatalf("live user query should hard-wrap onto multiple rows, got:\n%s", m.viewport.View())
 	}
 }
+
+func TestEstimateContextTokensAndCompaction(t *testing.T) {
+	cfg := Config{ContextLimit: 1000}
+	m := NewModel(context.Background(), cfg)
+
+	// Context includes system prompt
+	initialTokens := m.estimateContextTokens()
+	if initialTokens <= 0 {
+		t.Fatalf("expected initial context tokens to be > 0, got %d", initialTokens)
+	}
+
+	// Add user and assistant history
+	m.history = append(m.history,
+		ConversationTurn{Role: "user", Content: strings.Repeat("hello world ", 50)},
+		ConversationTurn{Role: "assistant", Content: strings.Repeat("answer here ", 50)},
+		ConversationTurn{Role: "user", Content: strings.Repeat("more text ", 50)},
+		ConversationTurn{Role: "assistant", Content: strings.Repeat("more answers ", 50)},
+		ConversationTurn{Role: "user", Content: strings.Repeat("even more text ", 50)},
+		ConversationTurn{Role: "assistant", Content: strings.Repeat("even more answers ", 50)},
+	)
+
+	// Add retrieved points
+	m.lastPoints = []rag.QdrantPoint{
+		{
+			ID: "pt1",
+			Payload: map[string]interface{}{
+				"text": strings.Repeat("chunk document content ", 40),
+			},
+		},
+	}
+
+	totalTokens := m.estimateContextTokens()
+	if totalTokens <= initialTokens {
+		t.Fatalf("expected total tokens to increase, got %d", totalTokens)
+	}
+
+	// Trigger compaction
+	m.maybeAutoCompact()
+	compactedTokens := m.estimateContextTokens()
+	if compactedTokens >= totalTokens {
+		t.Errorf("expected compaction to reduce tokens, before=%d, after=%d", totalTokens, compactedTokens)
+	}
+}
+
+func TestBuildPromptMessages_BudgetEnforcement(t *testing.T) {
+	cfg := Config{ContextLimit: 1000}
+	m := NewModel(context.Background(), cfg)
+	m.lastQuery = "Test question"
+
+	// Create huge points that would normally exceed 1000 tokens
+	m.lastPoints = []rag.QdrantPoint{
+		{
+			ID: "pt1",
+			Payload: map[string]interface{}{
+				"file_name": "doc1.txt",
+				"text":      strings.Repeat("chunk one data ", 100),
+			},
+		},
+		{
+			ID: "pt2",
+			Payload: map[string]interface{}{
+				"file_name": "doc2.txt",
+				"text":      strings.Repeat("chunk two data ", 200),
+			},
+		},
+		{
+			ID: "pt3",
+			Payload: map[string]interface{}{
+				"file_name": "doc3.txt",
+				"text":      strings.Repeat("chunk three data ", 300),
+			},
+		},
+	}
+
+	msgs := m.buildPromptMessages()
+	tokens := estimateChatMessageTokens(msgs)
+	if tokens > cfg.ContextLimit {
+		t.Fatalf("expected buildPromptMessages to stay within ContextLimit (%d), got %d tokens", cfg.ContextLimit, tokens)
+	}
+}
