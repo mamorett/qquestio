@@ -76,28 +76,31 @@ QQuestio supports three configuration methods. Values are merged with the follow
 
 ### Configuration Options
 
-| Environment Variable / JSON Key / CLI Flag | Description | Required | Example |
-|---|---|---|---|
-| `QDRANT_URL` / `qdrant_url` | Base URL of the Qdrant REST API | Yes | `http://localhost:6333` |
-| `QDRANT_API_KEY` / `qdrant_api_key` | Authentication API Key for Qdrant | Yes | `your-secret-api-key` |
-| `QDRANT_VECTOR_NAME` / `qdrant_vector_name` | Optional named vector to query in a multi-vector collection | No | `dense` |
-| `EMBEDDING_URL` / `embedding_url` | Base URL of the embedding server | Yes | `http://localhost:8080` |
-| `EMBEDDING_API_KEY` / `embedding_api_key` | Optional API Key for the embedding endpoint | No | `your-embedding-key` |
-| `EMBEDDING_MODEL` / `embedding_model` | Embedding model identifier | Yes | `nomic-embed-text-v1.5` |
-| `OPENAI_URL` / `openai_url` | Base URL of the OpenAI-compatible API | Yes | `http://localhost:4000` |
-| `OPENAI_API_KEY` / `openai_api_key` | Optional API Key for the OpenAI-compatible endpoint | No | `your-openai-key` |
-| `OPENAI_MODEL` / `openai_model` | LLM model name | Yes | `meta-llama/Llama-3-8B-Instruct` |
-| `OPENAI_MAX_TOKENS` / `openai_max_tokens` | Optional maximum completion token count (defaults to `0` for no limit/omit payload) | No | `0` |
-| `DEFAULT_COLLECTION` / `default_collection` | Starting Qdrant vector database collection | Yes | `documentation` |
-| `RERANKER_URL` / `reranker_url` | Base URL of the model-agnostic rerank endpoint | No | `http://localhost:8080/rerank` |
-| `RERANKER_API_KEY` / `reranker_api_key` | Optional API Key for the reranker endpoint | No | `your-reranker-key` |
-| `RERANKER_MODEL` / `reranker_model` | Optional model name for the rerank endpoint | No | `bge-reranker-large` |
-| `RERANKER_POOL` / `reranker_pool` | Number of primary candidates forwarded to the reranker. `0` (default) = auto (`3 × /limit`, clamped to 10–20). | No | `20` |
-| `SEARCH_CAP` / `search_cap` / `--search-cap` | Optional upper bound on the Qdrant search candidate pool. `0` (default) = no cap, search the full corpus. See [Search Scope vs. Return Count](#-search-scope-vs-return-count) below. | No | `50000` |
-| `QUERY_REWRITE` / `query_rewrite` | How follow-up questions are rewritten before embedding: `llm` (default), `heuristic` (pronoun detection), or `off` (raw queries). | No | `heuristic` |
-| `CONTEXT_LIMIT` / `context_limit` | Maximum token budget for conversation history (heuristic estimate — see [Context accounting](#context-accounting)). Auto-compaction triggers at 85%. Defaults to `131072`; set `0` to disable auto-compaction entirely. | No | `131072` |
-| `QQUESTIO_HTTP_TIMEOUT` / `http_timeout_seconds` | Request timeout in seconds for all external API calls (defaults to 60s). | No | `60` |
-| `QQUESTIO_SKILLS_REQUIRE_CONFIRM` / `skills_require_confirm` / `--safe` | Gating safety check that requires user verification prior to running any local tools/skills (defaults to false). | No | `true` |
+| Config File (`config.json`) | Environment Variable | CLI Flag / Switch | Description | Required | Example |
+|---|---|---|---|---|---|
+| `qdrant_url` | `QDRANT_URL` | — | Base URL of the Qdrant REST API | Yes | `http://localhost:6333` |
+| `qdrant_api_key` | `QDRANT_API_KEY` | — | Authentication API Key for Qdrant | Yes | `your-secret-api-key` |
+| `qdrant_vector_name` | `QDRANT_VECTOR_NAME` | — | Optional named vector to query in a multi-vector collection | No | `dense` |
+| `embedding_url` | `EMBEDDING_URL` | — | Base URL of the embedding server | Yes | `http://localhost:8080` |
+| `embedding_api_key` | `EMBEDDING_API_KEY` | — | Optional API Key for the embedding endpoint | No | `your-embedding-key` |
+| `embedding_model` | `EMBEDDING_MODEL` | — | Embedding model identifier | Yes | `nomic-embed-text-v1.5` |
+| `openai_url` | `OPENAI_URL` | — | Base URL of the OpenAI-compatible API | Yes | `http://localhost:4000` |
+| `openai_api_key` | `OPENAI_API_KEY` | — | Optional API Key for the OpenAI-compatible endpoint | No | `your-openai-key` |
+| `openai_model` | `OPENAI_MODEL` | — | LLM model name | Yes | `meta-llama/Llama-3-8B-Instruct` |
+| `openai_max_tokens` | `OPENAI_MAX_TOKENS` | — | Optional maximum completion token count (defaults to `0` for no limit/omit payload) | No | `0` |
+| `default_collection` | `DEFAULT_COLLECTION` | — | Starting Qdrant vector database collection | Yes | `documentation` |
+| `reranker_url` | `RERANKER_URL` | — | Base URL of the model-agnostic rerank endpoint | No | `http://localhost:8080/rerank` |
+| `reranker_api_key` | `RERANKER_API_KEY` | — | Optional API Key for the reranker endpoint | No | `your-reranker-key` |
+| `reranker_model` | `RERANKER_MODEL` | — | Optional model name for the rerank endpoint | No | `bge-reranker-large` |
+| `reranker_pool` | `RERANKER_POOL` | — | Number of primary candidates forwarded to the reranker. `0` (default) = auto (`3 × /limit`, clamped to 10–20). | No | `20` |
+| `search_cap` | `SEARCH_CAP` | `--search-cap <N>` | Optional upper bound on the Qdrant search candidate pool. `0` (default) = no cap, search the full corpus. See [Search Scope vs. Return Count](#-search-scope-vs-return-count) below. | No | `50000` |
+| `query_rewrite` | `QUERY_REWRITE` | — | How follow-up questions are rewritten before embedding: `llm` (default), `heuristic` (pronoun detection), or `off` (raw queries). | No | `heuristic` |
+| `context_limit` | `CONTEXT_LIMIT` | — | Maximum token budget for conversation history (heuristic estimate — see [Context accounting](#context-accounting)). Auto-compaction triggers at 85%. Defaults to `131072`; set `0` to disable auto-compaction entirely. | No | `131072` |
+| `http_timeout_seconds` | `QQUESTIO_HTTP_TIMEOUT` | — | Request timeout in seconds for all external API calls (defaults to 60s). | No | `60` |
+| `skills_require_confirm` | `QQUESTIO_SKILLS_REQUIRE_CONFIRM` | `--safe` | Gating safety check that requires user verification prior to running any local tools/skills (defaults to false). | No | `true` |
+| — | — | `--conf <name>` | Select named configuration profile from `configurations` block in `config.json`. | No | `production` |
+| — | — | `-c [session_id]` | Resume an existing session or the last active session (`-c` alone). | No | `-c last` |
+| — | `QQUESTIO_DEBUG` | `--debug` | Enable debug logging to file (`debug.log`). | No | `true` |
 
 ### 1. Example `config.json`
 ```json
