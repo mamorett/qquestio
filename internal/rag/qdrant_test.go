@@ -706,4 +706,3 @@ func TestSearchWithContextExpansion_CustomDocIDKey(t *testing.T) {
 		t.Errorf("expected expanded context to contain adjacent chunk text, got:\n%s", res.Context)
 	}
 }
-

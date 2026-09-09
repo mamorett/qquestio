@@ -97,7 +97,7 @@ func StartLiteLLMStream(ctx context.Context, baseURL, apiKey, model string, maxT
 	}
 
 	return &SSEReader{
-		body:    resp.Body,
+		body: resp.Body,
 		scanner: func() *bufio.Scanner {
 			s := bufio.NewScanner(resp.Body)
 			// Set buffer size to handle large SSE messages (up to 4 MB)

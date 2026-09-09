@@ -95,16 +95,16 @@ type Model struct {
 	currentPromptEstimate int  // Fallback prompt estimate for the active LLM call
 
 	// --- Pipeline transient ---
-	lastQuery         string            // The user query that started the pipeline
-	forceExactPhrase  bool              // True when /exact command was used
-	exactPhrase       string            // Parsed exact phrase (if any) to bypass embedding and force string match
-	exactPhrases      []string          // Parsed exact phrases (if any) to bypass embedding and force string match
-	ragContext        string            // Retrieved text from Qdrant (current turn)
-	lastPoints        []rag.QdrantPoint // Retrieved points from Qdrant (current turn)
-	cancelRequest     context.CancelFunc
-	streamReader      *rag.SSEReader
-	escCount      int  // consecutive Esc presses
-	stoppedByUser bool // explicit user abort flag
+	lastQuery        string            // The user query that started the pipeline
+	forceExactPhrase bool              // True when /exact command was used
+	exactPhrase      string            // Parsed exact phrase (if any) to bypass embedding and force string match
+	exactPhrases     []string          // Parsed exact phrases (if any) to bypass embedding and force string match
+	ragContext       string            // Retrieved text from Qdrant (current turn)
+	lastPoints       []rag.QdrantPoint // Retrieved points from Qdrant (current turn)
+	cancelRequest    context.CancelFunc
+	streamReader     *rag.SSEReader
+	escCount         int  // consecutive Esc presses
+	stoppedByUser    bool // explicit user abort flag
 
 	// --- Qdrant Collection Stats ---
 	qdrantPoints  int
@@ -270,17 +270,17 @@ func (m *Model) maybeAutoCompact() {
 	}
 	threshold := int(float64(m.cfg.ContextLimit) * 0.85)
 	target := int(float64(m.cfg.ContextLimit) * 0.75)
-	
+
 	for m.estimateContextTokens() > threshold {
 		before := len(m.history)
 		m.compactHistory(3)
 		after := len(m.history)
-		
+
 		// If history stopped shrinking, break to avoid infinite loop
 		if after == before {
 			break
 		}
-		
+
 		m.history = append(m.history, ConversationTurn{
 			Role: "system",
 			Content: fmt.Sprintf(
@@ -291,7 +291,7 @@ func (m *Model) maybeAutoCompact() {
 			),
 		})
 		m.statusMsg = fmt.Sprintf("Context auto-compacted (≥85%% of %s token limit)", formatNumber(m.cfg.ContextLimit))
-		
+
 		// Exit loop if under target budget
 		if m.estimateContextTokens() <= target {
 			break
@@ -618,7 +618,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// 1. /exact command was used (forceExactPhrase is true), OR
 				// 2. The entire query is a single quoted phrase (e.g., "exact phrase only")
 				shouldUseExact := m.forceExactPhrase || rag.IsFullyQuoted(rawClean)
-				
+
 				if shouldUseExact && len(m.exactPhrases) > 0 {
 					m.exactPhrase = m.exactPhrases[0]
 					m.output = ""
@@ -2207,7 +2207,7 @@ func GetSessionsDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, "config", "qquestio", "sessions")
+	dir := filepath.Join(home, ".config", "qquestio", "sessions")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}

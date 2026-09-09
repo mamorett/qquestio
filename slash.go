@@ -506,7 +506,7 @@ func (m *Model) handleSlashCmd(raw string) tea.Cmd {
 				return slashResultMsg{feedback: fmt.Sprintf("Nothing to compact (≤%d Q&A pairs in history)", keepPairs)}
 			}
 			m.history = append(m.history, ConversationTurn{
-				Role:    "system",
+				Role: "system",
 				Content: fmt.Sprintf("[ Manually compacted: %d entr%s removed, kept last %d Q&A pair(s) ]",
 					removed,
 					map[bool]string{true: "y", false: "ies"}[removed == 1],

@@ -1,9 +1,9 @@
 package rag
 
 import (
-"math/rand"
-"testing"
-"time"
+	"math/rand"
+	"testing"
+	"time"
 )
 
 // makeBenchPoints generates N random 1024-dim vectors for benchmarking.
@@ -31,10 +31,10 @@ func BenchmarkTopNCosine(b *testing.B) {
 	sizes := []int{10_000, 100_000, 500_000}
 	for _, n := range sizes {
 		b.Run(fmtSize(n), func(b *testing.B) {
-pts := makeBenchPoints(n, dim)
-query := make([]float32, dim)
-for i := range query {
-query[i] = rand.Float32()
+			pts := makeBenchPoints(n, dim)
+			query := make([]float32, dim)
+			for i := range query {
+				query[i] = rand.Float32()
 			}
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {

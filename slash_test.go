@@ -563,5 +563,3 @@ func TestHandleSlashCmd_Help(t *testing.T) {
 		t.Errorf("expected /help to include /write alias")
 	}
 }
-
-

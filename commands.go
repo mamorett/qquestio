@@ -41,7 +41,7 @@ func (m *Model) condenseQueryForRetrieval(ctx context.Context, raw string) strin
 		// Build messages for LLM rewrite
 		var messages []rag.ChatMessage
 		messages = append(messages, rag.ChatMessage{
-			Role: "system",
+			Role:    "system",
 			Content: "Rewrite the user's follow-up question as a single standalone search question that contains all necessary context. Output ONLY the rewritten question, no quotes, no commentary. If the question is already standalone, output it unchanged.",
 		})
 
@@ -614,7 +614,7 @@ func (m *Model) buildPromptMessages() []rag.ChatMessage {
 		} else if turn.Role == "system" && strings.HasPrefix(turn.Content, "[ Context compacted") {
 			// Include compaction summaries as user messages (not system) for better compatibility
 			msgs = append(msgs, rag.ChatMessage{
-				Role: "user",
+				Role:    "user",
 				Content: "[ Summary of earlier conversation ]\n" + turn.Content,
 			})
 		}

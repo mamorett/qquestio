@@ -38,3 +38,5 @@ go.work.sum
 /config.json
 _reference
 graphify-out
+.qwen
+.crush

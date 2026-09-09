@@ -35,20 +35,20 @@ const (
 )
 
 type Styles struct {
-	Header        lipgloss.Style // bg: nord1, fg: nord8, bold, full-width
-	HeaderStatus  lipgloss.Style // fg: nord14 (idle), nord13 (working), nord11 (error)
-	Viewport      lipgloss.Style // bg: nord0, fg: nord4, padding 1
-	Footer        lipgloss.Style // bg: nord1, fg: nord5
-	InputPrompt   lipgloss.Style // fg: nord8, bold ("❯ ")
-	InputText     lipgloss.Style // fg: nord6
-	ErrorText     lipgloss.Style // fg: nord11, italic
-	CollectionTag lipgloss.Style // fg: nord15, bg: nord2, padding 0 1
+	Header                lipgloss.Style // bg: nord1, fg: nord8, bold, full-width
+	HeaderStatus          lipgloss.Style // fg: nord14 (idle), nord13 (working), nord11 (error)
+	Viewport              lipgloss.Style // bg: nord0, fg: nord4, padding 1
+	Footer                lipgloss.Style // bg: nord1, fg: nord5
+	InputPrompt           lipgloss.Style // fg: nord8, bold ("❯ ")
+	InputText             lipgloss.Style // fg: nord6
+	ErrorText             lipgloss.Style // fg: nord11, italic
+	CollectionTag         lipgloss.Style // fg: nord15, bg: nord2, padding 0 1
 	MainViewportFocused   lipgloss.Style // focused main viewport border
 	MainViewportUnfocused lipgloss.Style // unfocused main viewport border
 	RefViewportFocused    lipgloss.Style // focused references viewport border
 	RefViewportUnfocused  lipgloss.Style // unfocused references viewport border
-	SpinnerStyle  lipgloss.Style // fg: nord8
-	ThinkingText  lipgloss.Style // fg: nord3, italic, subdued
+	SpinnerStyle          lipgloss.Style // fg: nord8
+	ThinkingText          lipgloss.Style // fg: nord3, italic, subdued
 }
 
 func DefaultStyles() Styles {
@@ -104,4 +104,3 @@ func DefaultStyles() Styles {
 			Italic(true),
 	}
 }
-

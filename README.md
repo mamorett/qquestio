@@ -15,9 +15,10 @@ Designed around the **Nord color palette**, QQuestio delivers a visually stunnin
 - **Non-Blocking Async Architecture**: Full background execution of HTTP embeddings, vector similarity search, reranking, and SSE stream reading via structured `tea.Cmd` loops.
 - **Real-time SSE Streaming**: High-performance, self-chaining Server-Sent Events parser that prints LLM responses token-by-token directly into a scrollable viewport.
 - **Two-Panel TUI Layout**: Split-screen design dividing the screen into a main chat panel (2/3 width) and a scrollable side panel for retrieved document references (1/3 width) that can be focused and scrolled independently.
-- **Automatic Session Recovery & Management**: Chronological timestamp-based sessions stored locally in `$HOME/config/qquestio/sessions`, with quick resume flags (`-c` to recover the latest session or `-c <sessionid>` for specific sessions), printing the active session ID upon quit.
+- **Automatic Session Recovery & Management**: Chronological timestamp-based sessions stored locally in `$HOME/.config/qquestio/sessions`, with quick resume flags (`-c` to recover the latest session or `-c <sessionid>` for specific sessions), printing the active session ID upon quit.
 - **Model-Agnostic Generic Reranking**: Optional, generic, and provider-agnostic reranking step that automatically expands the database candidate pool, query-scores retrieved points, and selects the top documents.
 - **Full-Corpus Recall by Default**: Uses Qdrant's native exact brute-force search (`params.exact=true`) to score every single vector in the collection server-side, with sub-second latency even for million-scale corpora. An optional `/cap` (or `--search-cap` / `SEARCH_CAP`) switches to HNSW approximate search for reduced latency on extremely large collections.
+- **Adjacent-Chunk Context Expansion**: Enabled by default (`/expand`, ±1). Each top match pulls its neighbouring chunks from the same document, so the LLM receives the complete surrounding slice rather than an isolated fragment.
 - **Dynamic Slash Commands**: Modify parameters at runtime (e.g., active collection, search limits, or system prompt) or copy transcripts without restarting the TUI.
 - **Skills System**: Plug-and-play local tools framework featuring a registry interface and execution dispatcher.
 - **Nord Theme Aesthetics**: Sophisticated, premium color design featuring distinct status bars, responsive padding, and dynamic state transitions.
@@ -48,7 +49,8 @@ flowchart TD
     
     stateStreaming -->|Tool call - requires confirm| stateConfirmSkill
     stateConfirmSkill -->|Y Allow once / A Allow always| stateSearching
-    stateConfirmSkill -->|N Deny / Cancel| stateIdle
+    stateConfirmSkill -->|N Deny - feeds error turn to model| stateSearching
+    stateConfirmSkill -->|Esc or Ctrl+C Cancel| stateIdle
     
     stateStreaming -->|Tool call - confirm off| stateSearching
     stateStreaming -->|streamChunkMsg - done=false| stateStreaming
@@ -78,6 +80,7 @@ QQuestio supports three configuration methods. Values are merged with the follow
 |---|---|---|---|
 | `QDRANT_URL` / `qdrant_url` | Base URL of the Qdrant REST API | Yes | `http://localhost:6333` |
 | `QDRANT_API_KEY` / `qdrant_api_key` | Authentication API Key for Qdrant | Yes | `your-secret-api-key` |
+| `QDRANT_VECTOR_NAME` / `qdrant_vector_name` | Optional named vector to query in a multi-vector collection | No | `dense` |
 | `EMBEDDING_URL` / `embedding_url` | Base URL of the embedding server | Yes | `http://localhost:8080` |
 | `EMBEDDING_API_KEY` / `embedding_api_key` | Optional API Key for the embedding endpoint | No | `your-embedding-key` |
 | `EMBEDDING_MODEL` / `embedding_model` | Embedding model identifier | Yes | `nomic-embed-text-v1.5` |
@@ -89,8 +92,10 @@ QQuestio supports three configuration methods. Values are merged with the follow
 | `RERANKER_URL` / `reranker_url` | Base URL of the model-agnostic rerank endpoint | No | `http://localhost:8080/rerank` |
 | `RERANKER_API_KEY` / `reranker_api_key` | Optional API Key for the reranker endpoint | No | `your-reranker-key` |
 | `RERANKER_MODEL` / `reranker_model` | Optional model name for the rerank endpoint | No | `bge-reranker-large` |
+| `RERANKER_POOL` / `reranker_pool` | Number of primary candidates forwarded to the reranker. `0` (default) = auto (`3 × /limit`, clamped to 10–20). | No | `20` |
 | `SEARCH_CAP` / `search_cap` / `--search-cap` | Optional upper bound on the Qdrant search candidate pool. `0` (default) = no cap, search the full corpus. See [Search Scope vs. Return Count](#-search-scope-vs-return-count) below. | No | `50000` |
-| `CONTEXT_LIMIT` / `context_limit` | Maximum token limit (4-chars ≈ 1 token heuristic). Auto-compaction triggers at 85%. Defaults to `0` (disabled/no limit). | No | `0` |
+| `QUERY_REWRITE` / `query_rewrite` | How follow-up questions are rewritten before embedding: `llm` (default), `heuristic` (pronoun detection), or `off` (raw queries). | No | `heuristic` |
+| `CONTEXT_LIMIT` / `context_limit` | Maximum token budget for conversation history (heuristic estimate — see [Context accounting](#context-accounting)). Auto-compaction triggers at 85%. Defaults to `131072`; set `0` to disable auto-compaction entirely. | No | `131072` |
 | `QQUESTIO_HTTP_TIMEOUT` / `http_timeout_seconds` | Request timeout in seconds for all external API calls (defaults to 60s). | No | `60` |
 | `QQUESTIO_SKILLS_REQUIRE_CONFIRM` / `skills_require_confirm` / `--safe` | Gating safety check that requires user verification prior to running any local tools/skills (defaults to false). | No | `true` |
 
@@ -110,7 +115,9 @@ QQuestio supports three configuration methods. Values are merged with the follow
   "reranker_url": "http://localhost:8080/rerank",
   "reranker_api_key": "your-reranker-key",
   "reranker_model": "bge-reranker-large",
+  "reranker_pool": 0,
   "search_cap": 0,
+  "query_rewrite": "llm",
   "context_limit": 131072,
   "http_timeout_seconds": 60,
   "skills_require_confirm": false
@@ -118,6 +125,14 @@ QQuestio supports three configuration methods. Values are merged with the follow
 ```
 
 > `search_cap` is optional. `0` (or omitted) means **no cap** — QQuestio will search the entire collection before truncating to the requested number of documents.
+
+### 1b. Configuration file location
+
+`config.json` is looked up at `$HOME/.config/qquestio/config.json` first, falling back to `./config.json` in the current directory. Session transcripts live alongside it under `$HOME/.config/qquestio/sessions/`.
+
+### Context accounting
+
+Token usage is estimated, not counted against a real tokenizer (`estimateTokens` in `model.go`): non-ASCII runes (CJK, emoji, accents) count as ~1 token each, and remaining ASCII bytes count at 4 bytes ≈ 1 token. The estimate covers the conversation text plus the current query's retrieved chunks — historical references stay in the transcript but are not replayed into later prompts. When the server returns usage in the SSE stream, the actual figure is used for the session token counter instead (a `~` prefix in the header marks a fallback estimate).
 
 ### 2. Multi-Profile Configurations
 You can define multiple named configuration profiles inside a `"configurations"` block in your `config.json`. This allows you to configure completely different databases, models, endpoints, timeouts, and collections, and easily switch between them.
@@ -177,11 +192,16 @@ Change state parameters or trigger clipboard actions at runtime from the prompt 
 - **`/collection <name>`**: Switches the active vector store collection instantly.
 - **`/conf [name]`**: Views the active config profile and all available configuration profiles, or switches to a different profile at runtime (e.g. `/conf production`).
 - **`/limit <1-100>`**: Sets the number of context documents (`docs`) to RETRIEVE into the prompt. This is the return-count side of the search; see [Search Scope vs. Return Count](#-search-scope-vs-return-count).
-- **`/cap [N|off|auto|exact|local]`**: Controls the candidate pool cap and search mode. `/cap 50000` → HNSW approximate top-50k; `/cap off` → no cap, uses Qdrant native brute-force (default); `/cap auto` → let the runtime decide; `/cap exact` → always force server-side brute-force (max Qdrant CPU usage); `/cap local` → force client-side brute-force on all local CPU cores (fallback). `/cap` alone prints the current cap and mode. See [Search Scope vs. Return Count](#-search-scope-vs-return-count).
-- **`/filter <key> <value>`** (or **`/filter clear`**): Filters vector search by exact metadata key-value match (e.g. `/filter file_name guide.txt`).
+- **`/expand <N|off>`**: Pulls ±`N` adjacent chunks from the same document around each match, reassembling fragmented context. `off`/`0` restores legacy top-N-only retrieval. **Default is `1`**; maximum `20` (each step widens the candidate pool and slows the query).
+- **`/cap [N|off|auto|exact|local]`**: Sets or clears the candidate-pool cap and doubles as a shortcut for the search-mode selector (see `/search`). `/cap 50000` → HNSW approximate top-50k; `/cap off` (or `none`/`unlimited`) → no cap, full-corpus search; `/cap auto`, `/cap exact`, `/cap local` → set the search mode without touching the numeric cap. `/cap` alone prints the current cap and mode. See [Search Scope vs. Return Count](#-search-scope-vs-return-count).
+- **`/search <auto|exact|local>`**: Selects the vector search strategy independently of the cap. `auto` (default) → HNSW when a cap is set, server-side exact search when it is not; `exact` → always force Qdrant server-side brute-force (`params.exact=true`); `local` → client-side brute-force scored on all local CPU cores from the on-disk corpus cache (fallback for servers that reject `params.exact=true`). `/search` alone prints the current mode.
+- **`/exact <phrase...>`**: Runs an immediate exact-string search for the phrase, bypassing vector similarity. Quoting an entire query triggers the same path automatically, and quoted substrings inside a normal query are extracted as exact phrases.
+- **`/filter <key> <value>`** (or **`/filter <value>`**, or **`/filter clear`**): Filters vector search by exact metadata match (e.g. `/filter file_name guide.txt`). With a single argument the value is matched against *any* document field. Surrounding quotes on the value are stripped.
 - **`/mode <strict|hybrid>`**: Switches between strict closed-book RAG and hybrid general-knowledge RAG modes.
-- **`/rerank <on|off>`**: Enables or bypasses the optional reranker step.
-- **`/cache [status|refresh|warmup|clear|dir]`**: Inspect or control the on-disk corpus cache. `/cache warmup` pre-populates the cache for offline use.
+- **`/rewrite [llm|heuristic|off]`**: Controls how follow-up questions are rewritten before embedding — `llm` (default, model-assisted), `heuristic` (pronoun detection), or `off` (send the raw query). `/rewrite` alone prints the current mode.
+- **`/rerank <on|off>`**: Enables or bypasses the optional reranker step. If the reranker is unreachable at query time, QQuestio degrades gracefully to vector ranking and flags the turn as degraded.
+- **`/rerankerpool <N|auto>`**: Sets how many primary candidates are forwarded to the reranker. Smaller pools protect the calibration of small-to-medium reranker models, which degrade beyond ~20 candidates per call. `auto` (default) sizes it as `3 × /limit`, clamped to 10–20.
+- **`/cache [status|refresh|warmup|clear|dir]`**: Inspect or control the on-disk corpus cache. `/cache warmup` pre-populates the cache for offline use; `/cache refresh` re-scrolls Qdrant on the next full-corpus query.
 - **`/system <prompt...>`**: Re-defines the active RAG system instructions for subsequent turns.
 - **`/compact [N]`**: Compacts older history to free up context space, leaving the last `N` Q&A pairs intact (default 3). Auto-triggers at 85% of `CONTEXT_LIMIT`.
 - **`/clear`**: Clears the conversation history, retrieved references, and context strings (retains prompt input history).
@@ -199,25 +219,35 @@ Change state parameters or trigger clipboard actions at runtime from the prompt 
 
 ## 🔍 Search Scope vs. Return Count
 
-QQuestio uses two different search strategies depending on the `cap` setting:
+QQuestio picks between three search strategies from the `cap` and `search mode` settings:
 
 | Strategy | When | How it works |
 |---|---|---|
-| **Exact search** (default) | `cap = 0` or unset | Sends `params.exact=true` to Qdrant's `/points/query` API. Qdrant performs a brute-force scan of the **entire collection** server-side using SIMD-optimized vector math. Sub-second even for millions of vectors. |
-| **HNSW search** | `cap > 0` | Sends the cap as the `limit` to Qdrant's HNSW index. Faster for very large collections, but approximate (may miss some true nearest neighbors). |
+| **Exact search** (default) | No cap, mode `auto` or `exact` | Sends `params.exact=true` to Qdrant's `/points/query` API. Qdrant performs a brute-force scan of the **entire collection** server-side using SIMD-optimized vector math. Sub-second even for millions of vectors. The primary top-N matches are then widened by `/expand` via batched parallel scroll requests. |
+| **HNSW search** | `cap > 0` (mode `auto`) | Sends the cap as the `limit` to Qdrant's HNSW index. Faster for very large collections, but approximate (may miss some true nearest neighbors). Context expansion is bypassed on this path. |
+| **Local brute-force** | No cap, mode `local` | Streams every vector through `/points/scroll`, caches it on disk, and computes cosine similarity client-side across all local CPU cores. Network-bound and slower, but works when Qdrant refuses `params.exact=true`. |
+
+Setting a cap does not force HNSW: with `/search exact` and a cap set, QQuestio still requests exact scoring over the capped candidate pool. The cap acts as a floor, never below the internally computed candidate pool.
 
 | Knob | Meaning | Default | Where to set it |
 |---|---|---|---|
 | **Candidate pool** (`candidateLimit`) | How many candidates Qdrant considers during HNSW search (only when capped) | Entire collection (exact search) | `search_cap` / `SEARCH_CAP` / `--search-cap` / `/cap` |
 | **Return count** (`docs`) | How many of the top candidates are actually injected into the LLM prompt | `10` | `/limit` |
+| **Expansion** (`expand`) | Adjacent chunks pulled from the same document around each match | `±1` | `/expand` |
+| **Strategy** (`searchMode`) | `auto`, `exact`, or `local` | `auto` | `/search` (or `/cap auto|exact|local`) |
 
-The header bar shows the live values, e.g. `Limit: 10  Cap: none  Mode: strict` or `Limit: 5  Cap: 50000  Mode: hybrid`.
+The header bar shows the live values on its second line, e.g.:
 
-### When to use `/cap`
+```text
+DB: http://localhost:6333 (✓)  │  Col: documents  │  Limit: 10  │  Expand: ±1  │  Cap: none  │  Search: auto  │  Cache: 12.4k pts  │  RAG: strict  │  Ctx: 8.2k/131k (6%)  │  Tokens: 41.2k
+```
 
-- **Leave it unset (default)** for most collections. Qdrant's exact search handles millions of vectors in under a second.
+### When to use `/cap` and `/search`
+
+- **Leave both unset (default)** for most collections. Qdrant's exact search handles millions of vectors in under a second.
 - **Set `/cap 50000` (or similar)** if you have a multi-hundred-million-vector collection and need the fastest possible response.
-- **Use `/cap off`** to restore full-corpus exact search after a cap was set.
+- **Use `/cap off`** to restore full-corpus search after a cap was set.
+- **Use `/search local`** only if your Qdrant deployment rejects `params.exact=true`; pair it with `/cache warmup` so the corpus is already local.
 
 ---
 
@@ -241,7 +271,7 @@ Keyboard shortcuts are active global overlays and can be triggered without losin
 
 QQuestio automatically tracks and serializes your conversations to keep your context saved between runs.
 
-- **Storage Path**: `$HOME/config/qquestio/sessions/*.json`
+- **Storage Path**: `$HOME/.config/qquestio/sessions/*.json`
 - **Session IDs**: Chronological timestamp identifiers (e.g. `20260619-114154`).
 - **Exiting TUI**: Upon exit, the active session is saved, and its ID is printed to the terminal:
   ```bash
@@ -264,7 +294,7 @@ QQuestio features a plug-and-play **Skills System** that allows the LLM to dynam
 
 ### How It Works
 
-1. **Tool Definition**: Skills implement the `Skill` interface, which defines a name, description, and an `Execute(ctx, args)` entrypoint.
+1. **Tool Definition**: Skills implement the `Skill` interface, which defines a name, description, and an `Execute(ctx context.Context, args []byte) (string, error)` entrypoint. Arguments arrive as raw bytes — the built-in `bash` skill accepts either a JSON object (`{"command": "..."}`) or a plain command string.
 2. **LLM Prompting**: When the registry has registered skills (such as the default `bash` skill), descriptions of these tools are dynamically injected into the system prompt.
 3. **Execution Loop**:
    - If the LLM determines it needs a tool, it outputs a command using the syntax:
@@ -274,9 +304,20 @@ QQuestio features a plug-and-play **Skills System** that allows the LLM to dynam
    - The TUI detects this output, pauses LLM streaming, executes the skill asynchronously (non-blocking), formats the execution output, and feeds it back into the model's chat history.
    - The TUI then restarts streaming, letting the LLM react to the execution results and finish its explanation.
 
+### Confirming Skill Execution
+
+When `--safe`, `QQUESTIO_SKILLS_REQUIRE_CONFIRM`, or `skills_require_confirm` is enabled, each call halts on a confirmation dialog:
+
+| Key | Effect |
+|---|---|
+| `Y` | Allow this one call |
+| `A` | Allow this skill for the rest of the session (reset by `/conf`) |
+| `N` | Deny — a synthetic error turn is fed back so the model can recover |
+| `Esc` / `Ctrl+C` | Cancel the call without reporting anything to the model |
+
 ### Default Skills
 
-*   **`bash`**: Executes a bash command in a subprocess (`/bin/bash` or `/bin/sh`) on the client machine and returns combined stdout and stderr to the LLM.
+*   **`bash`**: Executes a bash command in a subprocess (`/bin/bash`, falling back to `/bin/sh`, then a `PATH` lookup) on the client machine and returns combined stdout and stderr to the LLM. The process is killed if it runs longer than 30 seconds.
 
 ---
 

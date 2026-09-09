@@ -32,9 +32,9 @@ type QdrantRange struct {
 }
 
 type QdrantFieldCondition struct {
-	Key   string        `json:"key"`
-	Match *QdrantMatch  `json:"match,omitempty"`
-	Range *QdrantRange  `json:"range,omitempty"`
+	Key   string       `json:"key"`
+	Match *QdrantMatch `json:"match,omitempty"`
+	Range *QdrantRange `json:"range,omitempty"`
 }
 
 type QdrantFilter struct {
@@ -244,8 +244,6 @@ func SearchQdrant(ctx context.Context, baseURL, apiKey, collection string, vecto
 
 	return strings.Join(texts, "\n---\n"), respBody.Result, nil
 }
-
-
 
 func getPayloadKeys(payload map[string]interface{}) []string {
 	if payload == nil {
@@ -1049,8 +1047,6 @@ func GetCollectionInfo(ctx context.Context, baseURL, apiKey, collection string) 
 	return info.Result.PointsCount, info.Result.VectorsCount, info.Result.Status, nil
 }
 
-
-
 // DocumentIDKeys is the ordered list of payload keys we look at to identify which
 // "document" a chunk belongs to. The first non-empty string match wins.
 var DocumentIDKeys = []string{
@@ -1568,8 +1564,6 @@ func ApplyExpansionToPrimaries(
 
 	return sb.String(), out
 }
-
-
 
 // exactSearchWithPoints is identical to SearchQdrantExact but also returns the
 // parsed []QdrantPoint slice, so the caller can use the points for expansion.
