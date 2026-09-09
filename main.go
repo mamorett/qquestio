@@ -39,14 +39,21 @@ func main() {
 		}
 	}
 
-	// Parse version flags
+	// Parse version and info flags
 	versionFlag := flag.Bool("version", false, "Print version information and exit")
 	vFlag := flag.Bool("v", false, "Print version information and exit")
+	listConfFlag := flag.Bool("list-conf", false, "List available configurations in a formatted view and exit")
+	listConfsFlag := flag.Bool("list-confs", false, "List available configurations in a formatted view and exit (alias)")
 	debugFlagPtr := flag.Bool("debug", false, "Enable debug logging to file")
 	searchCapFlag := flag.Int("search-cap", -1, "Maximum candidate pool for Qdrant search (-1 = no CLI override, 0 = no cap, N = cap to N)")
 	safeFlag := flag.Bool("safe", false, "Require user confirmation before executing any local skills/tools")
 	confFlag := flag.String("conf", "", "Configuration profile to load from config file")
 	flag.Parse()
+
+	if *listConfFlag || *listConfsFlag {
+		fmt.Println(FormatConfigurations())
+		os.Exit(0)
+	}
 
 	cliSearchCap = *searchCapFlag
 	cliSafe = *safeFlag

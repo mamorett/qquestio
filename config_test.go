@@ -342,3 +342,70 @@ func stringsContains(s, substr string) bool {
 	}
 	return false
 }
+
+func TestMaskSecret(t *testing.T) {
+	if !contains(maskSecret(""), "(none)") {
+		t.Errorf("expected empty secret to render (none), got %s", maskSecret(""))
+	}
+	if maskSecret("short") != "••••••" {
+		t.Errorf("expected short secret to render 6 bullets, got %s", maskSecret("short"))
+	}
+	if maskSecret("sk-1234567890abcdef") != "sk-•••ef" {
+		t.Errorf("expected long secret to be masked at ends, got %s", maskSecret("sk-1234567890abcdef"))
+	}
+}
+
+func TestFormatConfigurations_NoFile(t *testing.T) {
+	_ = os.Remove("config.json")
+	out := FormatConfigurations()
+	if !contains(out, "QQuestio Configurations") {
+		t.Errorf("expected header in output, got:\n%s", out)
+	}
+}
+
+func TestFormatConfigurations_WithProfiles(t *testing.T) {
+	jsonContent := `{
+		"qdrant_url": "http://localhost:6333",
+		"qdrant_api_key": "supersecretkey",
+		"openai_url": "http://localhost:4000",
+		"openai_model": "llama3",
+		"default_collection": "docs",
+		"default_configuration": "production",
+		"configurations": {
+			"production": {
+				"default_collection": "prod-docs",
+				"openai_model": "gpt-4-turbo"
+			},
+			"testing": {
+				"default_collection": "test-docs"
+			}
+		}
+	}`
+	err := os.WriteFile("config.json", []byte(jsonContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write mock config.json: %v", err)
+	}
+	defer os.Remove("config.json")
+
+	out := FormatConfigurations()
+	if !contains(out, "QQuestio Configurations") {
+		t.Errorf("expected header in output, got:\n%s", out)
+	}
+	if !contains(out, "production") {
+		t.Errorf("expected production profile in output, got:\n%s", out)
+	}
+	if !contains(out, "testing") {
+		t.Errorf("expected testing profile in output, got:\n%s", out)
+	}
+	if !contains(out, "DEFAULT") {
+		t.Errorf("expected DEFAULT badge in output, got:\n%s", out)
+	}
+	// Check that secret was masked
+	if contains(out, "supersecretkey") {
+		t.Errorf("expected secret key to be masked, but found plaintext 'supersecretkey'")
+	}
+	if !contains(out, "sup•••ey") {
+		t.Errorf("expected masked secret 'sup•••ey' in output, got:\n%s", out)
+	}
+}
+

@@ -106,6 +106,7 @@ QQuestio supports three configuration methods. Values are merged with the follow
 | `--search-cap <N>` | Maximum candidate pool for Qdrant search (`0` = full corpus, `-1` = no CLI override). | `search_cap` / `SEARCH_CAP` |
 | `--safe` | Require user confirmation before executing any local skills/tools. | `skills_require_confirm` / `QQUESTIO_SKILLS_REQUIRE_CONFIRM` |
 | `--conf <name>` | Select a named configuration profile defined in the `configurations` block. | Active profile |
+| `--list-conf` | List all available configuration profiles in a formatted view and exit. | — |
 | `-c [session_id]` | Resume an existing session by ID, or the most recent session (`-c` alone). | Session transcript |
 | `--debug` | Enable file-based debug logging to `debug.log`. | `QQUESTIO_DEBUG=1` |
 | `--version`, `-v` | Print application version information and exit. | — |
