@@ -76,31 +76,39 @@ QQuestio supports three configuration methods. Values are merged with the follow
 
 ### Configuration Options
 
-| Config Key | Env Var | CLI Flag | Description |
-|---|---|---|---|
-| `qdrant_url` | `QDRANT_URL` | — | **Required.** Base URL of the Qdrant REST API (e.g. `http://localhost:6333`). |
-| `qdrant_api_key` | `QDRANT_API_KEY` | — | **Required.** Authentication API key for Qdrant. |
-| `qdrant_vector_name` | `QDRANT_VECTOR_NAME` | — | Optional named vector in multi-vector collections (e.g. `dense`). |
-| `embedding_url` | `EMBEDDING_URL` | — | **Required.** Base URL of the embedding server (e.g. `http://localhost:8080`). |
-| `embedding_api_key` | `EMBEDDING_API_KEY` | — | Optional API key for the embedding endpoint. |
-| `embedding_model` | `EMBEDDING_MODEL` | — | **Required.** Embedding model name (e.g. `nomic-embed-text-v1.5`). |
-| `openai_url` | `OPENAI_URL` | — | **Required.** Base URL of OpenAI-compatible API (e.g. `http://localhost:4000`). |
-| `openai_api_key` | `OPENAI_API_KEY` | — | Optional API key for OpenAI-compatible endpoint. |
-| `openai_model` | `OPENAI_MODEL` | — | **Required.** LLM model name (e.g. `meta-llama/Llama-3-8B-Instruct`). |
-| `openai_max_tokens` | `OPENAI_MAX_TOKENS` | — | Max completion tokens (default `0` = omit limit). |
-| `default_collection` | `DEFAULT_COLLECTION` | — | **Required.** Default Qdrant collection (e.g. `documentation`). |
-| `reranker_url` | `RERANKER_URL` | — | Base URL of model-agnostic reranker (e.g. `http://localhost:8080/rerank`). |
-| `reranker_api_key` | `RERANKER_API_KEY` | — | Optional API key for the reranker endpoint. |
-| `reranker_model` | `RERANKER_MODEL` | — | Optional model name for the rerank endpoint (e.g. `bge-reranker-large`). |
-| `reranker_pool` | `RERANKER_POOL` | — | Primary candidates for reranker (default `0` = auto: `3 × /limit`, 10–20). |
-| `search_cap` | `SEARCH_CAP` | `--search-cap <N>` | Candidate pool cap; `0` = full corpus (default `0`, e.g. `50000`). |
-| `query_rewrite` | `QUERY_REWRITE` | — | Follow-up rewrite mode: `llm` (default), `heuristic`, or `off`. |
-| `context_limit` | `CONTEXT_LIMIT` | — | History token budget (default `131072`, auto-compacts at 85%; `0` = off). |
-| `http_timeout_seconds` | `QQUESTIO_HTTP_TIMEOUT` | — | Request timeout in seconds for all external API calls (default `60`). |
-| `skills_require_confirm` | `QQUESTIO_SKILLS_REQUIRE_CONFIRM` | `--safe` | Confirmation prompt before executing local skills (default `false`). |
-| — | — | `--conf <name>` | Select named configuration profile from `config.json`. |
-| — | — | `-c [session_id]` | Resume an existing session or the last active session (`-c` alone). |
-| — | `QQUESTIO_DEBUG` | `--debug` | Enable debug logging to file (`debug.log`). |
+| Config Key (`config.json`) | Environment Variable | Description |
+|---|---|---|
+| `qdrant_url` | `QDRANT_URL` | **Required.** Base URL of the Qdrant REST API (e.g. `http://localhost:6333`). |
+| `qdrant_api_key` | `QDRANT_API_KEY` | **Required.** Authentication API key for Qdrant. |
+| `qdrant_vector_name` | `QDRANT_VECTOR_NAME` | Optional named vector in multi-vector collections (e.g. `dense`). |
+| `embedding_url` | `EMBEDDING_URL` | **Required.** Base URL of the embedding server (e.g. `http://localhost:8080`). |
+| `embedding_api_key` | `EMBEDDING_API_KEY` | Optional API key for the embedding endpoint. |
+| `embedding_model` | `EMBEDDING_MODEL` | **Required.** Embedding model name (e.g. `nomic-embed-text-v1.5`). |
+| `openai_url` | `OPENAI_URL` | **Required.** Base URL of OpenAI-compatible API (e.g. `http://localhost:4000`). |
+| `openai_api_key` | `OPENAI_API_KEY` | Optional API key for OpenAI-compatible endpoint. |
+| `openai_model` | `OPENAI_MODEL` | **Required.** LLM model name (e.g. `meta-llama/Llama-3-8B-Instruct`). |
+| `openai_max_tokens` | `OPENAI_MAX_TOKENS` | Max completion tokens (default `0` = omit limit). |
+| `default_collection` | `DEFAULT_COLLECTION` | **Required.** Default Qdrant collection (e.g. `documentation`). |
+| `reranker_url` | `RERANKER_URL` | Base URL of model-agnostic reranker (e.g. `http://localhost:8080/rerank`). |
+| `reranker_api_key` | `RERANKER_API_KEY` | Optional API key for the reranker endpoint. |
+| `reranker_model` | `RERANKER_MODEL` | Optional model name for the rerank endpoint (e.g. `bge-reranker-large`). |
+| `reranker_pool` | `RERANKER_POOL` | Primary candidates for reranker (default `0` = auto: `3 × /limit`, 10–20). |
+| `search_cap` | `SEARCH_CAP` | Candidate pool cap; `0` = full corpus (default `0`, e.g. `50000`). Overridden by `--search-cap`. |
+| `query_rewrite` | `QUERY_REWRITE` | Follow-up rewrite mode: `llm` (default), `heuristic`, or `off`. |
+| `context_limit` | `CONTEXT_LIMIT` | History token budget (default `131072`, auto-compacts at 85%; `0` = off). |
+| `http_timeout_seconds` | `QQUESTIO_HTTP_TIMEOUT` | Request timeout in seconds for all external API calls (default `60`). |
+| `skills_require_confirm` | `QQUESTIO_SKILLS_REQUIRE_CONFIRM` | Require confirmation before running local skills (default `false`). Overridden by `--safe`. |
+
+### Command-Line Switches
+
+| CLI Switch | Description | Overrides / Maps To |
+|---|---|---|
+| `--search-cap <N>` | Maximum candidate pool for Qdrant search (`0` = full corpus, `-1` = no CLI override). | `search_cap` / `SEARCH_CAP` |
+| `--safe` | Require user confirmation before executing any local skills/tools. | `skills_require_confirm` / `QQUESTIO_SKILLS_REQUIRE_CONFIRM` |
+| `--conf <name>` | Select a named configuration profile defined in the `configurations` block. | Active profile |
+| `-c [session_id]` | Resume an existing session by ID, or the most recent session (`-c` alone). | Session transcript |
+| `--debug` | Enable file-based debug logging to `debug.log`. | `QQUESTIO_DEBUG=1` |
+| `--version`, `-v` | Print application version information and exit. | — |
 
 ### 1. Example `config.json`
 ```json
